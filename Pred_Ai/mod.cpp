@@ -1,0 +1,9 @@
+name = "Pred_Ai";
+picture = "";
+logo = "";
+logoSmall = "";
+logoOver = "";
+tooltip = "Pred_Ai";
+overview = "Pred_Ai V11: server-side decision overlay for DayZ Expansion AI. Adds threat memory, group/squad cohesion, break-LOS tactical movement, suppression awareness, anti-body-camp and anti-doorway-stare on top of a 13-level goal cascade.";
+author = "Preston";
+version = "11.0";
