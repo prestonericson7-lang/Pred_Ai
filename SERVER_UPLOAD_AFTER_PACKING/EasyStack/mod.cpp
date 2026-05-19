@@ -1,0 +1,11 @@
+name = "EasyStack";
+picture = "";
+logo = "";
+logoSmall = "";
+logoOver = "";
+tooltip = "EasyStack";
+overview = "Auto-stacks pickups, caps ammo piles at 99, and safely combines two empty same-tier weapons/clothing into one tier better.";
+action = "";
+author = "Preston";
+authorID = "";
+version = "1.0";
