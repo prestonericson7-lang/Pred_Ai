@@ -1,0 +1,59 @@
+# =============================================================================
+#  Pred Ai BMW — BeamMP Dedicated Server config (TEMPLATE)
+# =============================================================================
+#  This is a ready-to-use ServerConfig.toml. Three things before you launch:
+#
+#    1. Paste your real AuthKey below (get it from https://keymaster.beammp.com,
+#       Discord login -> "Keys" -> green "+"). The server WILL NOT START without
+#       a valid key — you'll get an [ERROR] about authentication.
+#    2. Set Name / MaxPlayers / Map to the values from YOUR original
+#       ServerConfig.toml if they differ from the placeholders here.
+#    3. NEVER commit or share the file once your real AuthKey is in it.
+#       Treat the AuthKey like a password. (See README -> "Keep your AuthKey
+#       out of git".)
+#
+#  Docs: https://docs.beammp.com/server/create-a-server/
+# =============================================================================
+
+[General]
+
+# --- Identity -------------------------------------------------------------
+# Shows in the server browser / direct-connect. Change to whatever you like.
+Name = "Pred Ai BMW Server"
+Description = "Private BMW freeroam — friends only."
+Tags = "Freeroam,Modded"
+
+# --- Networking -----------------------------------------------------------
+# Port 30814 (as you specified). You forward THIS port as BOTH TCP and UDP.
+Port = 30814
+# "::" binds to all interfaces (IPv4 + IPv6). Leave this alone.
+IP = "::"
+
+# --- Auth -----------------------------------------------------------------
+# >>> PASTE YOUR REAL AUTHKEY BETWEEN THE QUOTES. DO NOT SHARE IT. <<<
+AuthKey = "PASTE-YOUR-AUTHKEY-HERE"
+# false = players must be logged into a BeamMP account (fine for you + 1 friend).
+AllowGuests = false
+
+# --- Privacy --------------------------------------------------------------
+# true  = hidden from the public server browser; reachable only by direct IP.
+#         This is what "private, friends-only" means — exactly your setup.
+# (You still need a valid AuthKey even when Private = true.)
+Private = true
+
+# --- Gameplay limits ------------------------------------------------------
+# Tuned conservative for an 8 GB laptop that's ALSO running the game.
+MaxPlayers = 8
+MaxCars = 2
+
+# --- Map ------------------------------------------------------------------
+# Stock map (safe default). To use a CUSTOM map, set its path here AND drop
+# the map's .zip into Resources/Client so it auto-downloads to joiners.
+# Other stock options: /levels/west_coast_usa/info.json,
+#   /levels/italy/info.json, /levels/johnson_valley/info.json
+Map = "/levels/gridmap_v2/info.json"
+
+# --- Misc -----------------------------------------------------------------
+LogChat = true
+Debug = false
+ResourceFolder = "Resources"

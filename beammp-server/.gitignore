@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+#  Keep secrets and big/binary files OUT of git.
+# ---------------------------------------------------------------------------
+
+# Auto-download vehicle/map mods: large, and often not yours to redistribute.
+# Keep the .zip files only on your laptop, inside Resources/Client/.
+Resources/Client/*.zip
+Resources/Client/*.ZIP
+
+# The downloaded server binary + runtime junk (re-download fresh on the host).
+BeamMP-Server*.exe
+Server.exe
+*.log
+crash/
+logs/
+
+# ServerConfig.toml is committed as a TEMPLATE with a placeholder AuthKey.
+# Once you paste your REAL AuthKey into it locally, do NOT let git track that
+# change. From inside this folder, run:
+#     git update-index --skip-worktree ServerConfig.toml
+# (to start tracking edits again later: --no-skip-worktree)
