@@ -50,37 +50,37 @@ A flag means **"worth a closer look,"** never "confirmed surveillance."
 
 ---
 
-## Hardware
+## Hardware — verified LAFVIN ESP32-S3 AI Chatbot pin map
 
-| Part                  | Connection                                   |
-|-----------------------|----------------------------------------------|
-| ESP32-S3 board (kit)  | —                                            |
-| 2.0" TFT (kit)        | SPI; set `TFT_CS / TFT_DC / TFT_RST` to your shield's pins |
-| Alert LED             | `ALERT_LED_PIN` (wire one to a free GPIO)    |
-| Buzzer (optional)     | `BUZZER_PIN` — set `ENABLE_BUZZER 1`         |
-| GPS (optional, later) | UART → `GPS_RX_PIN` / `GPS_TX_PIN`, 9600 baud |
-| microSD (optional)    | SPI → `SD_CS_PIN`                            |
+Pins below are taken from LAFVIN's own board source (the display is **ST7789**,
+240×320, colour-inverted — *not* ILI9341). They're already set in the sketch.
 
-> **Pins are placeholders.** The ESP32-S3 + LAFVIN shield use different GPIOs
-> than a classic ESP32. Set the `#define`s at the top of the sketch to match the
-> shield's silkscreen (look for `CS DC RES MOSI SCK BLK` next to the TFT header).
+| Signal              | GPIO | Notes                              |
+|---------------------|------|------------------------------------|
+| TFT MOSI            | 40   | ST7789 SPI                         |
+| TFT SCLK            | 41   |                                    |
+| TFT CS              | 47   |                                    |
+| TFT DC              | 39   |                                    |
+| TFT RST             | 4    |                                    |
+| TFT Backlight       | 42   | driven HIGH = on                   |
+| Builtin LED (alert) | 48   | TFT flash is the primary alert     |
+| Buzzer (optional)   | 21   | `ENABLE_BUZZER 1`                  |
+| GPS (optional)      | 16/17| UART, 9600 baud                    |
+| microSD (optional)  | 5    | not in base kit                    |
+
+> If the screen is rotated/upside-down, change `tft.setRotation(3)` to `1`. If
+> colours look inverted, toggle `tft.invertDisplay(true/false)` in `setup()`.
 
 ## Software
 
-1. Arduino IDE with the **ESP32 board package** (core **3.x**), board set to your
-   **ESP32-S3** (enable PSRAM; this module is N16R8 = 16 MB flash / 8 MB PSRAM).
-2. Install libraries: **TinyGPSPlus**, **Adafruit GFX**, **Adafruit ILI9341**.
-3. Open `surveillance_detector.ino`, set the TFT pins, upload.
+1. Arduino IDE with the **ESP32 board package** (core **3.x**), board = **ESP32-S3**,
+   **PSRAM enabled** (module is N16R8 = 16 MB flash / 8 MB PSRAM).
+2. Install libraries: **TinyGPSPlus**, **Adafruit GFX**, **Adafruit ST7789**.
+3. Open `surveillance_detector.ino`, upload.
 4. Open Serial Monitor at **115200 baud**.
 
-> **If the screen is blank or garbled**, your panel is probably an **ST7789**, not
-> ILI9341 — swap `#include <Adafruit_ILI9341.h>` for `Adafruit_ST7789` and the
-> constructor accordingly. Set `ENABLE_TFT 0` to build headless (serial only).
->
-> **Core note:** on core **3.x** `BLEScan::start()` returns a `BLEScanResults*`
-> (what this sketch uses). On older **2.x** cores it returns a value — change
-> `BLEScanResults* results = ...` to `BLEScanResults results = ...` and use `.`
-> instead of `->`.
+> Set `ENABLE_TFT 0` to build headless (serial only) if you haven't installed the
+> Adafruit libraries yet. The watchdog auto-adapts to core 2.x vs 3.x.
 
 ---
 
@@ -100,11 +100,15 @@ timestamp,lat,lon,type,mac,label,rssi,hits,flags
 
 - `rssi` — signal strength; closer to 0 = physically closer to you.
 - `flags`:
-  - `VENDOR` — matches a known camera/tracker brand.
-  - `FOLLOWING` — *(needs GPS)* seen at two spots > `MOVE_METERS` apart while
-    staying with you.
-  - `APPROACHING` — *(no GPS needed)* its signal climbed ≥ `APPROACH_DB` dB over
-    several sightings, i.e. it's closing the distance on you. This is how
+  - `VENDOR` — matches a known camera/tracker brand by **MAC vendor (OUI)** *or*
+    by **SSID/BLE-name keyword** (e.g. an SSID containing `reolink`, `ipcam`,
+    `tapo`, or a BLE name containing `airtag`, `tile`). Keyword + OUI together
+    catch far more than OUI alone.
+  - `FOLLOWING` — *(needs GPS)* moved with you (> `MOVE_METERS`), sustained over
+    several scan cycles and `APPROACH_MIN_MS`.
+  - `APPROACHING` — *(no GPS needed)* its **smoothed** signal climbed ≥
+    `APPROACH_DB` dB across ≥ `APPROACH_MIN_CYC` cycles over ≥ `APPROACH_MIN_MS` —
+    i.e. it's been closing on you for a while, not a one-off spike. This is how
     "something is following me" works on the bare kit.
 
 ### Alerts
@@ -138,20 +142,27 @@ the device still works fully — it just starts fresh each boot.
 
 ## Tuning
 
-Edit the `#define`s near the top of the sketch:
+Edit the `#define`s near the top of the sketch. **Higher thresholds = fewer
+false alarms; lower = more sensitive.**
 
-- `SCAN_PERIOD` — ms between scan cycles (default 15 s).
+- `SCAN_PERIOD` — ms between scan cycles (default 12 s).
 - `BLE_SCAN_SECS` — length of each BLE listen window.
-- `APPROACH_DB` / `APPROACH_MIN_HITS` — how aggressively to call something
-  "approaching" without GPS. Lower dB = more sensitive (more false alarms).
+- `APPROACH_DB` — dB the smoothed signal must rise to count as approaching (10).
+- `APPROACH_MIN_CYC` — min scan cycles a device must persist before it can be
+  flagged approaching/following (4) — the main transient-killer.
+- `APPROACH_MIN_MS` — min time a device must be around first (60 s).
+- `EMA_ALPHA` — RSSI smoothing (0.4). Lower = smoother/slower, fewer spikes.
 - `MOVE_METERS` — GPS distance that counts as "following you."
-- `MAX_DEVICES` — RAM tracking-table size.
+- `MAX_DEVICES` — RAM tracking-table size (oldest **unflagged** device is
+  recycled when full, so flagged threats are never forgotten on a long walk).
 
-### Extending vendor detection
+### Extending detection (two ways)
 
-`OUI_TABLE[]` is a **starter** list. MAC vendor prefixes (first 3 bytes) are
-public — look them up at the IEEE OUI registry or maclookup.app and add rows for
-any camera brands you want to catch. More entries = better coverage.
+1. **`OUI_TABLE[]`** — MAC vendor prefixes (first 3 bytes). Add rows from the
+   IEEE OUI registry / maclookup.app for more camera brands.
+2. **`SSID_KEYWORDS[]` / `BLE_KEYWORDS[]`** — substrings matched against WiFi
+   SSIDs and BLE names. Often catches devices whose MAC is randomized or whose
+   vendor isn't in the OUI table. Add brand words you care about.
 
 ---
 
