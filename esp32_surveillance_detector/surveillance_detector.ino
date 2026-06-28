@@ -10,6 +10,9 @@
  *   - Stores sightings to an SD card as CSV for later review.
  *   - Flags devices that follow you across distinct locations (the real danger
  *     signal for a tracker) and devices from known camera/tracker vendors.
+ *   - ALERTS you the moment a device is flagged: onboard LED + optional buzzer,
+ *     and (when a cellular modem is attached) an SMS to your phone.
+ *   - Remembers flagged devices across reboots (table saved to SD).
  *
  * What it does NOT do:
  *   - It does NOT transmit, jam, spoof, or spam anything. There is no beacon
@@ -19,15 +22,17 @@
  *   - It can only see devices that are POWERED ON and TRANSMITTING on 2.4 GHz.
  *   - It CANNOT detect wired/analog cameras, cameras with their radio off, or
  *     anything recording locally to SD with WiFi disabled.
+ *   - It CANNOT hear 5 GHz WiFi (the ESP32 radio is 2.4 GHz only; that needs an
+ *     ESP32-C5). A 5 GHz antenna does NOT add the band — the chip decides it.
  *   - Vendor (OUI) matching is a strong hint, not proof. MACs can be randomized
  *     or spoofed, and the OUI table here is a small starter set — expand it.
- *   - "Camera" is inferred, never certain. Treat flags as "worth a closer look,"
- *     not as confirmed surveillance.
  *
  * Hardware:
  *   - ESP32 dev board
  *   - microSD module on SPI (CS = GPIO 5)
  *   - UART GPS module (e.g. NEO-6M) on GPIO 16 (RX) / 17 (TX), 9600 baud
+ *   - Onboard LED on GPIO 2 (alert). Optional buzzer (see ENABLE_BUZZER).
+ *   - Optional cellular modem (SIM7600 etc.) on GPIO 26/27 (see ENABLE_CELLULAR).
  *
  * Libraries: TinyGPSPlus, plus the ESP32 Arduino core (WiFi, BLE, SD, SPI).
  */
@@ -49,14 +54,35 @@
 #define GPS_TX_PIN    17
 #define GPS_BAUD      9600
 
+#define ALERT_LED_PIN 2          // onboard LED on most ESP32 dev boards
+
 #define LOG_PATH      "/sightings.csv"
+#define DB_PATH       "/devices.dat"   // persistent tracking table
 #define BLE_SCAN_SECS 4          // seconds per BLE scan window
 #define SCAN_PERIOD   15000UL    // ms between full scan cycles
 #define MAX_DEVICES   200        // in-RAM tracking table size
 #define MOVE_METERS   75.0       // seen this far apart => "mobile / following you"
 
+// ---- Optional buzzer alert ----
+#define ENABLE_BUZZER 0          // set to 1 if a buzzer is wired to BUZZER_PIN
+#define BUZZER_PIN    4
+
+// ---- Optional cellular SMS alert (4G LTE / 5G modem, e.g. SIM7600) ----
+// Set to 1 ONLY once a modem is wired and has a SIM with SMS service. The
+// detector stays fully passive; the modem is used solely to text YOU an alert.
+#define ENABLE_CELLULAR 0
+#define MODEM_RX_PIN  26         // ESP32 RX  <- modem TX
+#define MODEM_TX_PIN  27         // ESP32 TX  -> modem RX
+#define MODEM_BAUD    115200
+#define ALERT_PHONE   "+10000000000"   // <-- your number in international format
+#define ALERT_COOLDOWN_MS 120000UL     // min gap between SMS alerts (anti-flood)
+
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(1);
+#if ENABLE_CELLULAR
+HardwareSerial modemSerial(2);
+unsigned long lastSmsTime = 0;
+#endif
 
 // ---------------- Known vendor OUIs ----------------
 // First 3 bytes of a MAC identify the manufacturer. This is a STARTER set of
@@ -97,6 +123,7 @@ struct Sighting {
   double  lastLat,  lastLon;
   bool    mobileFlag;     // seen at >MOVE_METERS apart => possibly following
   bool    vendorFlag;     // matched a camera/tracker vendor
+  bool    alerted;        // we already raised an alert for this device
   char    label[24];      // vendor or BLE label
 };
 
@@ -150,6 +177,74 @@ int lookupOui(const uint8_t* m) {
   return -1;
 }
 
+// ---------------- Persistence (survive reboot) ----------------
+void saveTable() {
+  if (!sdReady) return;
+  File f = SD.open(DB_PATH, FILE_WRITE);   // truncates/overwrites
+  if (!f) return;
+  f.write((const uint8_t*)&deviceCount, sizeof(deviceCount));
+  if (deviceCount > 0)
+    f.write((const uint8_t*)devices, sizeof(Sighting) * deviceCount);
+  f.close();
+}
+
+void loadTable() {
+  if (!sdReady || !SD.exists(DB_PATH)) return;
+  File f = SD.open(DB_PATH, FILE_READ);
+  if (!f) return;
+  int count = 0;
+  if (f.read((uint8_t*)&count, sizeof(count)) == sizeof(count) &&
+      count >= 0 && count <= MAX_DEVICES) {
+    int want = sizeof(Sighting) * count;
+    if (f.read((uint8_t*)devices, want) == want) deviceCount = count;
+  }
+  f.close();
+  Serial.printf("Loaded %d remembered devices from SD.\n", deviceCount);
+}
+
+// ---------------- Alerts ----------------
+void localAlert() {
+  for (int i = 0; i < 6; i++) {
+    digitalWrite(ALERT_LED_PIN, HIGH);
+#if ENABLE_BUZZER
+    tone(BUZZER_PIN, 2200, 80);
+#endif
+    delay(90);
+    digitalWrite(ALERT_LED_PIN, LOW);
+    delay(90);
+  }
+}
+
+#if ENABLE_CELLULAR
+// Minimal AT-command SMS for SIM7600/SIM800-class modules. Text mode.
+void sendSms(const String& msg) {
+  if (millis() - lastSmsTime < ALERT_COOLDOWN_MS) return;  // anti-flood
+  lastSmsTime = millis();
+  modemSerial.println("AT+CMGF=1");           // SMS text mode
+  delay(300);
+  modemSerial.print("AT+CMGS=\"");
+  modemSerial.print(ALERT_PHONE);
+  modemSerial.println("\"");
+  delay(300);
+  modemSerial.print(msg);
+  modemSerial.write(26);                       // Ctrl-Z = send
+  delay(500);
+}
+#endif
+
+void raiseAlert(const Sighting* s, const char* reason) {
+  String msg = String("ALERT: ") + reason + " " +
+               (s->isBle ? "BLE " : "WIFI ") + macToStr(s->mac) +
+               " [" + s->label + "] rssi=" + s->bestRssi +
+               " @ " + String(curLat, 6) + "," + String(curLon, 6) +
+               " " + timestamp();
+  Serial.print("*** "); Serial.println(msg);
+  localAlert();
+#if ENABLE_CELLULAR
+  sendSms(msg);
+#endif
+}
+
 // ---------------- Core: record a sighting ----------------
 void recordDevice(const uint8_t* mac, bool isBle, int rssi, const char* label, bool vendorHit) {
   // Find existing entry.
@@ -171,6 +266,7 @@ void recordDevice(const uint8_t* mac, bool isBle, int rssi, const char* label, b
     s->firstLat = curLat; s->firstLon = curLon;
     s->mobileFlag = false;
     s->vendorFlag = vendorHit;
+    s->alerted = false;
     strncpy(s->label, label, sizeof(s->label) - 1);
     s->label[sizeof(s->label) - 1] = '\0';
   }
@@ -187,6 +283,13 @@ void recordDevice(const uint8_t* mac, bool isBle, int rssi, const char* label, b
   }
 
   logSighting(s, rssi, label);
+
+  // Alert once, the first time a device becomes noteworthy. "Following" is the
+  // stronger signal, so prefer that wording when both are true.
+  if ((s->vendorFlag || s->mobileFlag) && !s->alerted) {
+    raiseAlert(s, s->mobileFlag ? "FOLLOWING device" : "known vendor device");
+    s->alerted = true;
+  }
 }
 
 void logSighting(Sighting* s, int rssi, const char* label) {
@@ -307,7 +410,7 @@ void handleCommand(String cmd) {
   cmd.toLowerCase();
 
   if (cmd == "help" || cmd == "?") {
-    Serial.println("Commands: list | flagged | gps | clear | help");
+    Serial.println("Commands: list | flagged | gps | save | clear | testalert | help");
   } else if (cmd == "list") {
     Serial.printf("== %d devices tracked ==\n", deviceCount);
     for (int i = 0; i < deviceCount; i++) printDevice(&devices[i]);
@@ -321,9 +424,19 @@ void handleCommand(String cmd) {
     Serial.printf("GPS fix=%s lat=%.6f lon=%.6f sats=%d\n",
                   gpsFix ? "yes" : "no", curLat, curLon,
                   gps.satellites.isValid() ? gps.satellites.value() : 0);
+  } else if (cmd == "save") {
+    saveTable();
+    Serial.println("Table saved to SD.");
   } else if (cmd == "clear") {
     deviceCount = 0;
-    Serial.println("In-RAM table cleared (SD log kept).");
+    saveTable();
+    Serial.println("Table cleared (SD CSV log kept).");
+  } else if (cmd == "testalert") {
+    Serial.println("Firing test alert...");
+    localAlert();
+#if ENABLE_CELLULAR
+    sendSms("Pred_Ai test alert");
+#endif
   } else if (cmd.length() > 0) {
     Serial.println("Unknown. Type 'help'.");
   }
@@ -339,6 +452,9 @@ void setup() {
   delay(200);
   Serial.println("\nPred_Ai Surveillance Awareness Logger (passive / receive-only)");
 
+  pinMode(ALERT_LED_PIN, OUTPUT);
+  digitalWrite(ALERT_LED_PIN, LOW);
+
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
   sdReady = SD.begin(SD_CS_PIN);
@@ -350,9 +466,17 @@ void setup() {
         f.println("timestamp,lat,lon,type,mac,label,rssi,hits,flags");
       f.close();
     }
+    loadTable();   // restore remembered devices from a previous run
   } else {
     Serial.println("SD: NOT found (logging to serial only)");
   }
+
+#if ENABLE_CELLULAR
+  modemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+  delay(1500);
+  modemSerial.println("AT");          // wake/handshake
+  Serial.println("Cellular: modem serial started");
+#endif
 
   // WiFi in station mode = scan/listen only. No AP, no transmit beacons.
   WiFi.mode(WIFI_STA);
@@ -378,7 +502,8 @@ void loop() {
 
   if (millis() - lastScan > SCAN_PERIOD) {
     lastScan = millis();
-    scanWifi();   // WiFi and BLE share one radio; run sequentially.
+    scanWifi();    // WiFi and BLE share one radio; run sequentially.
     scanBle();
+    saveTable();   // persist so flagged devices survive a reboot
   }
 }

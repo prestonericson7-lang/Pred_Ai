@@ -8,7 +8,21 @@ follow you** across distinct locations.
 It only **listens**. It does not transmit, jam, spoof, or broadcast anything —
 there is no beacon flooding, no fake access points, no BLE advertising. That is
 deliberate: those behaviors are illegal spectrum interference and would put
-*you* on the map, not hide you.
+*you* on the map, not hide you. (The one thing it *can* transmit is an **SMS
+alert to your own phone** via an optional cellular modem — see below.)
+
+## About "5G" and salvaged WiFi parts
+
+The band a radio can hear is fixed in the **transceiver chip**, not the antenna
+or a plug-in card:
+
+- The classic **ESP32 is 2.4 GHz only.** A 5 GHz antenna will not add 5 GHz —
+  it only detunes 2.4 GHz reception. To detect **5 GHz WiFi cameras** you need an
+  **ESP32-C5** board (or a Raspberry Pi + 5 GHz USB adapter).
+- A laptop **Intel WiFi card** speaks PCIe and needs an OS driver; an ESP32
+  cannot drive it.
+- **"5G" cellular** is a separate radio entirely. It needs a **cellular modem
+  module** (e.g. SIM7600 for 4G LTE, or a 5G-NR modem) — see *Cellular alerts*.
 
 ---
 
@@ -38,6 +52,9 @@ A flag means **"worth a closer look,"** never "confirmed surveillance."
 | ESP32 dev board | —                                   |
 | microSD (SPI)   | CS → GPIO 5 (MOSI/MISO/SCK = default SPI) |
 | GPS (UART)      | GPS TX → GPIO 16, GPS RX → GPIO 17, 9600 baud |
+| Alert LED       | GPIO 2 (onboard LED on most boards) |
+| Buzzer (opt.)   | GPIO 4 — set `ENABLE_BUZZER 1` |
+| Cellular modem (opt.) | modem TX → GPIO 26, modem RX → GPIO 27 — set `ENABLE_CELLULAR 1` |
 
 Pins are `#define`d at the top of the sketch — change them to match your wiring.
 
@@ -76,15 +93,43 @@ timestamp,lat,lon,type,mac,label,rssi,hits,flags
     `MOVE_METERS` (default 75 m) apart, i.e. it is moving *with* you. For a
     tracker, this is the signal that actually matters.
 
+### Alerts
+
+When a device is **first flagged** (known vendor, or confirmed FOLLOWING) the
+device alerts you immediately — it doesn't wait for you to read the SD card:
+
+- **Onboard LED** blinks (GPIO 2), plus an optional **buzzer** (`ENABLE_BUZZER 1`).
+- Each device alerts **once** so you aren't spammed on every re-sighting.
+- Use the `testalert` serial command to verify your LED/buzzer/SMS path.
+
+### Reboot-persistent memory
+
+The tracking table is saved to `/devices.dat` on SD after every scan and reloaded
+on boot, so a device already marked **FOLLOWING** stays flagged across power
+cycles. `clear` wipes it; the CSV history log is always kept.
+
+### Cellular alerts (optional 4G/5G modem)
+
+With a modem wired up (SIM7600-class) and `ENABLE_CELLULAR 1`, a flag also sends
+an **SMS to your phone**. Set `ALERT_PHONE` to your number (international format,
+e.g. `+1...`). The modem is used *only* to text you — the detector stays passive.
+SMS alerts are rate-limited by `ALERT_COOLDOWN_MS` so you don't get flooded.
+
+> A true 5G-NR modem works the same way over AT commands but costs more and runs
+> hotter; a SIM7600 (LTE) is the practical choice and people commonly call it
+> "4G/5G." Either way the wiring and `sendSms()` path are identical.
+
 ### Serial review commands
 
-| Command   | Action                                            |
-|-----------|---------------------------------------------------|
-| `list`    | All devices currently tracked in RAM              |
-| `flagged` | Only vendor-matched or following devices          |
-| `gps`     | Current GPS fix / coordinates / satellite count   |
-| `clear`   | Reset the in-RAM table (SD log is kept)           |
-| `help`    | Show commands                                     |
+| Command     | Action                                          |
+|-------------|-------------------------------------------------|
+| `list`      | All devices currently tracked                   |
+| `flagged`   | Only vendor-matched or following devices        |
+| `gps`       | Current GPS fix / coordinates / satellite count |
+| `save`      | Force-save the tracking table to SD             |
+| `clear`     | Reset the table (SD CSV log is kept)            |
+| `testalert` | Fire the LED/buzzer (and SMS, if enabled)       |
+| `help`      | Show commands                                   |
 
 ---
 
