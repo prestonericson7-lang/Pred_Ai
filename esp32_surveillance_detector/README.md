@@ -1,45 +1,50 @@
-# Pred_Ai — Wireless Surveillance Awareness Logger (ESP32)
+# Pred_Ai — Wireless Surveillance Awareness Logger (ESP32-S3)
 
-A **passive, receive-only** ESP32 tool that listens for nearby WiFi and BLE
-devices, tags likely **cameras / IoT / trackers**, stamps each sighting with
-**GPS location + UTC time**, logs it to an SD card, and **flags devices that
-follow you** across distinct locations.
+A **passive, receive-only** tool that listens for nearby WiFi and BLE devices,
+tags likely **cameras / IoT / trackers**, and **alerts you on a screen** the
+moment something looks like it's a known camera vendor or is **following you**.
+
+Built for the **LAFVIN ESP32-S3 AI kit** — it runs on the kit alone (live TFT
+screen + LED alert). **GPS and microSD are optional** and light up automatically
+if you wire them later.
 
 It only **listens**. It does not transmit, jam, spoof, or broadcast anything —
-there is no beacon flooding, no fake access points, no BLE advertising. That is
-deliberate: those behaviors are illegal spectrum interference and would put
-*you* on the map, not hide you. (The one thing it *can* transmit is an **SMS
-alert to your own phone** via an optional cellular modem — see below.)
+no beacon flooding, no fake access points, no BLE advertising. Those behaviors
+are illegal spectrum interference and would put *you* on the map, not hide you.
 
-## About "5G" and salvaged WiFi parts
+## About "5G" — important hardware truth
 
 The band a radio can hear is fixed in the **transceiver chip**, not the antenna
 or a plug-in card:
 
-- The classic **ESP32 is 2.4 GHz only.** A 5 GHz antenna will not add 5 GHz —
-  it only detunes 2.4 GHz reception. To detect **5 GHz WiFi cameras** you need an
-  **ESP32-C5** board (or a Raspberry Pi + 5 GHz USB adapter).
-- A laptop **Intel WiFi card** speaks PCIe and needs an OS driver; an ESP32
+- Your **ESP32-S3 is 2.4 GHz only** — it says so right on the module
+  (`2.4G 802.11 b/g/n`). A 5 GHz antenna will *not* add 5 GHz; it only detunes
+  the 2.4 GHz reception. To hear **5 GHz WiFi cameras** you'd need a different
+  chip (**ESP32-C5**) or a Raspberry Pi + 5 GHz USB adapter.
+- A laptop **Intel WiFi card** speaks PCIe and needs an OS driver; the ESP32
   cannot drive it.
-- **"5G" cellular** is a separate radio entirely. It needs a **cellular modem
-  module** (e.g. SIM7600 for 4G LTE, or a 5G-NR modem) — see *Cellular alerts*.
+- **"5G" cellular** is a separate radio that needs a modem module + SIM. We
+  removed that path — this build uses **no SIM and no cellular**.
+
+The good news: most WiFi cameras and **all** BLE trackers (AirTags, Tile,
+SmartTags) live on 2.4 GHz, so the S3 still catches a lot.
 
 ---
 
 ## What it can and cannot detect
 
 **Can detect** (anything powered on and transmitting on 2.4 GHz):
-- WiFi cameras (Hikvision, Dahua, Wyze, Nest, Ring, Reolink, Tuya, Axis, …)
-  identified by their MAC vendor prefix (OUI).
+- WiFi cameras (Hikvision, Dahua, Wyze, Nest, Ring, Reolink, Tuya, Axis, …) by
+  their MAC vendor prefix (OUI).
 - BLE trackers — AirTag / Find My, Tile, Samsung SmartTag — by their BLE
   advertising signature.
 - Any other WiFi AP or BLE device nearby (logged, not necessarily flagged).
 
-**Cannot detect** (be honest with yourself about the blind spots):
-- Wired or analog hidden cameras with no radio.
+**Cannot detect** (know the blind spots so you trust it correctly):
+- Wired/analog hidden cameras with no radio.
 - Cameras recording locally with WiFi turned off.
-- Anything not transmitting at the moment you pass by.
-- Devices using randomized MACs are logged but cannot be vendor-identified.
+- Anything on **5 GHz** (see above), or not transmitting as you pass.
+- Devices using randomized MACs are logged but can't be vendor-identified.
 
 A flag means **"worth a closer look,"** never "confirmed surveillance."
 
@@ -47,88 +52,86 @@ A flag means **"worth a closer look,"** never "confirmed surveillance."
 
 ## Hardware
 
-| Part            | Connection                          |
-|-----------------|-------------------------------------|
-| ESP32 dev board | —                                   |
-| microSD (SPI)   | CS → GPIO 5 (MOSI/MISO/SCK = default SPI) |
-| GPS (UART)      | GPS TX → GPIO 16, GPS RX → GPIO 17, 9600 baud |
-| Alert LED       | GPIO 2 (onboard LED on most boards) |
-| Buzzer (opt.)   | GPIO 4 — set `ENABLE_BUZZER 1` |
-| Cellular modem (opt.) | modem TX → GPIO 26, modem RX → GPIO 27 — set `ENABLE_CELLULAR 1` |
+| Part                  | Connection                                   |
+|-----------------------|----------------------------------------------|
+| ESP32-S3 board (kit)  | —                                            |
+| 2.0" TFT (kit)        | SPI; set `TFT_CS / TFT_DC / TFT_RST` to your shield's pins |
+| Alert LED             | `ALERT_LED_PIN` (wire one to a free GPIO)    |
+| Buzzer (optional)     | `BUZZER_PIN` — set `ENABLE_BUZZER 1`         |
+| GPS (optional, later) | UART → `GPS_RX_PIN` / `GPS_TX_PIN`, 9600 baud |
+| microSD (optional)    | SPI → `SD_CS_PIN`                            |
 
-Pins are `#define`d at the top of the sketch — change them to match your wiring.
+> **Pins are placeholders.** The ESP32-S3 + LAFVIN shield use different GPIOs
+> than a classic ESP32. Set the `#define`s at the top of the sketch to match the
+> shield's silkscreen (look for `CS DC RES MOSI SCK BLK` next to the TFT header).
 
 ## Software
 
-1. Arduino IDE with the **ESP32 board package** installed (targets **core 3.x**;
-   see the note below if you are on 2.x).
-2. Install the **TinyGPSPlus** library (Library Manager).
-3. Open `surveillance_detector.ino`, select your ESP32 board, upload.
+1. Arduino IDE with the **ESP32 board package** (core **3.x**), board set to your
+   **ESP32-S3** (enable PSRAM; this module is N16R8 = 16 MB flash / 8 MB PSRAM).
+2. Install libraries: **TinyGPSPlus**, **Adafruit GFX**, **Adafruit ILI9341**.
+3. Open `surveillance_detector.ino`, set the TFT pins, upload.
 4. Open Serial Monitor at **115200 baud**.
 
-> **Core-version note:** on ESP32 Arduino core **3.x**, `BLEScan::start()` returns
-> a `BLEScanResults*` (pointer) and BLE string getters return `String` — that is
-> what this sketch uses. On older **2.x** cores `start()` returns a value: change
-> `BLEScanResults* results = pBLEScan->start(...)` to
-> `BLEScanResults results = pBLEScan->start(...)` and use `results.` instead of
-> `results->`.
+> **If the screen is blank or garbled**, your panel is probably an **ST7789**, not
+> ILI9341 — swap `#include <Adafruit_ILI9341.h>` for `Adafruit_ST7789` and the
+> constructor accordingly. Set `ENABLE_TFT 0` to build headless (serial only).
+>
+> **Core note:** on core **3.x** `BLEScan::start()` returns a `BLEScanResults*`
+> (what this sketch uses). On older **2.x** cores it returns a value — change
+> `BLEScanResults* results = ...` to `BLEScanResults results = ...` and use `.`
+> instead of `->`.
 
 ---
 
 ## Using it
 
-Sightings stream to the serial monitor and to `/sightings.csv` on the SD card:
+The TFT shows a **live radar**: flagged devices first (red = following/approaching,
+yellow = known vendor), with a footer showing how many devices are tracked and
+whether GPS/SD are present. New flags flash the screen red and blink the LED.
+
+If an SD card is present, sightings also stream to `/sightings.csv`:
 
 ```
 timestamp,lat,lon,type,mac,label,rssi,hits,flags
 2026-06-28T14:03:11Z,40.712776,-74.005974,WIFI,2C:AA:8E:11:22:33,Wyze,-58,3,VENDOR
-2026-06-28T14:05:02Z,40.713900,-74.004100,BLE,D1:A2:B3:C4:D5:E6,AirTag/FindMy?,-71,9,VENDOR FOLLOWING
+2026-06-28T14:05:02Z,40.713900,-74.004100,BLE,D1:A2:B3:C4:D5:E6,AirTag/FindMy?,-71,9,VENDOR APPROACHING
 ```
 
-- `rssi` is signal strength — closer to 0 means physically closer to you.
-- `hits` is how many times that device has been seen.
+- `rssi` — signal strength; closer to 0 = physically closer to you.
 - `flags`:
-  - `VENDOR` — MAC/BLE signature matches a known camera or tracker brand.
-  - `FOLLOWING` — the same device was seen at two locations more than
-    `MOVE_METERS` (default 75 m) apart, i.e. it is moving *with* you. For a
-    tracker, this is the signal that actually matters.
+  - `VENDOR` — matches a known camera/tracker brand.
+  - `FOLLOWING` — *(needs GPS)* seen at two spots > `MOVE_METERS` apart while
+    staying with you.
+  - `APPROACHING` — *(no GPS needed)* its signal climbed ≥ `APPROACH_DB` dB over
+    several sightings, i.e. it's closing the distance on you. This is how
+    "something is following me" works on the bare kit.
 
 ### Alerts
 
-When a device is **first flagged** (known vendor, or confirmed FOLLOWING) the
-device alerts you immediately — it doesn't wait for you to read the SD card:
+When a device is **first flagged**, you're warned immediately — no need to read
+the SD card:
 
-- **Onboard LED** blinks (GPIO 2), plus an optional **buzzer** (`ENABLE_BUZZER 1`).
+- **TFT** flashes red and lists the device; **LED** blinks (+ optional buzzer).
 - Each device alerts **once** so you aren't spammed on every re-sighting.
-- Use the `testalert` serial command to verify your LED/buzzer/SMS path.
+- `testalert` (serial) fires the LED/buzzer to verify wiring.
 
-### Reboot-persistent memory
+### Reboot-persistent memory *(needs SD)*
 
-The tracking table is saved to `/devices.dat` on SD after every scan and reloaded
-on boot, so a device already marked **FOLLOWING** stays flagged across power
-cycles. `clear` wipes it; the CSV history log is always kept.
-
-### Cellular alerts (optional 4G/5G modem)
-
-With a modem wired up (SIM7600-class) and `ENABLE_CELLULAR 1`, a flag also sends
-an **SMS to your phone**. Set `ALERT_PHONE` to your number (international format,
-e.g. `+1...`). The modem is used *only* to text you — the detector stays passive.
-SMS alerts are rate-limited by `ALERT_COOLDOWN_MS` so you don't get flooded.
-
-> A true 5G-NR modem works the same way over AT commands but costs more and runs
-> hotter; a SIM7600 (LTE) is the practical choice and people commonly call it
-> "4G/5G." Either way the wiring and `sendSms()` path are identical.
+With an SD card, the tracking table is saved to `/devices.dat` and reloaded on
+boot, so a device already flagged stays flagged across power cycles. Without SD,
+the device still works fully — it just starts fresh each boot.
 
 ### Serial review commands
 
 | Command     | Action                                          |
 |-------------|-------------------------------------------------|
 | `list`      | All devices currently tracked                   |
-| `flagged`   | Only vendor-matched or following devices        |
-| `gps`       | Current GPS fix / coordinates / satellite count |
-| `save`      | Force-save the tracking table to SD             |
+| `flagged`   | Vendor / following / approaching devices        |
+| `gps`       | Current GPS fix / coordinates / satellites      |
+| `save`      | Force-save the tracking table (if SD present)   |
 | `clear`     | Reset the table (SD CSV log is kept)            |
-| `testalert` | Fire the LED/buzzer (and SMS, if enabled)       |
+| `testalert` | Fire the LED/buzzer                             |
 | `help`      | Show commands                                   |
 
 ---
@@ -139,22 +142,22 @@ Edit the `#define`s near the top of the sketch:
 
 - `SCAN_PERIOD` — ms between scan cycles (default 15 s).
 - `BLE_SCAN_SECS` — length of each BLE listen window.
-- `MOVE_METERS` — distance that counts as "following you."
+- `APPROACH_DB` / `APPROACH_MIN_HITS` — how aggressively to call something
+  "approaching" without GPS. Lower dB = more sensitive (more false alarms).
+- `MOVE_METERS` — GPS distance that counts as "following you."
 - `MAX_DEVICES` — RAM tracking-table size.
 
 ### Extending vendor detection
 
-`OUI_TABLE[]` is a **starter** list. MAC vendor prefixes (the first 3 bytes)
-are public — look them up at the IEEE OUI registry or maclookup.app and add
-rows for any cameras/brands you want to catch. More entries = better coverage.
+`OUI_TABLE[]` is a **starter** list. MAC vendor prefixes (first 3 bytes) are
+public — look them up at the IEEE OUI registry or maclookup.app and add rows for
+any camera brands you want to catch. More entries = better coverage.
 
 ---
 
 ## Roadmap ideas (all still receive-only)
 
-- Buzzer/LED alert the moment a `FOLLOWING` device is confirmed.
-- Persist the device table to SD so "following" survives a reboot.
-- WiFi probe-request sniffing (promiscuous RX) to see what *your own* devices
-  leak.
-- Optional AES-encrypted log (mbedTLS is already on the ESP32) instead of plain
-  CSV, if the log itself is sensitive.
+- Speaker tones through the kit's I2S audio codec (richer than a buzzer).
+- On-screen detail view: tap a button to see a device's history/RSSI trend.
+- WiFi probe-request sniffing (promiscuous RX) to see what *your own* devices leak.
+- Auto-expiring stale devices from the table so it doesn't fill up on long walks.
