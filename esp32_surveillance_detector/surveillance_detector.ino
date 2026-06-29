@@ -51,11 +51,36 @@
   Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 #endif
 
-// ---------------- pins / config ----------------
-#define ALERT_LED_PIN 48        // kit builtin LED (TFT flash is the main alert)
-#define ENABLE_BUZZER 0         // optional passive buzzer
-#define BUZZER_PIN    21        // (kept off 4: that's TFT_RST)
+// ---------------- audio (kit ES8311 codec speaker) ----------------
+// Verified LAFVIN pins. NOTE: GPIO48 is the speaker AMP enable (PA), not an LED.
+#define ENABLE_AUDIO  1          // 0 = silent (screen+serial only; no extra libs)
+#define PA_EN_PIN     48         // speaker amplifier enable
+#define I2S_MCLK_PIN  38
+#define I2S_BCLK_PIN  14
+#define I2S_WS_PIN    13
+#define I2S_DOUT_PIN  45
+#define CODEC_SDA_PIN 1
+#define CODEC_SCL_PIN 2
+#define ES8311_ADDR   0x18
+#define AUDIO_RATE    22050
 
+// Optional discrete LED — set to a free GPIO if you wire one (-1 = none).
+// (Do NOT use 48: that's the audio amp.)
+#define ALERT_LED_PIN -1
+
+#if ENABLE_AUDIO && (ESP_IDF_VERSION_MAJOR < 5)
+  #warning "Audio requires ESP32 Arduino core 3.x (IDF5) — disabling audio."
+  #undef ENABLE_AUDIO
+  #define ENABLE_AUDIO 0
+#endif
+#if ENABLE_AUDIO
+  #include <Wire.h>
+  #include <driver/i2s_std.h>
+  i2s_chan_handle_t i2sTx = nullptr;
+  bool audioReady = false;
+#endif
+
+// ---------------- pins / config ----------------
 #define SD_CS_PIN  5            // optional microSD (not in base kit)
 #define GPS_RX_PIN 16           // optional GPS
 #define GPS_TX_PIN 17
@@ -253,6 +278,67 @@ void loadTable(){
   Serial.printf("Loaded %d remembered devices.\n",deviceCount);
 }
 
+// ---------------- audio (ES8311 codec + I2S tones) ----------------
+#if ENABLE_AUDIO
+void es8311W(uint8_t r,uint8_t v){Wire.beginTransmission(ES8311_ADDR);Wire.write(r);Wire.write(v);Wire.endTransmission();}
+bool es8311Probe(){Wire.beginTransmission(ES8311_ADDR);return Wire.endTransmission()==0;}
+
+void audioInit(){
+  pinMode(PA_EN_PIN,OUTPUT); digitalWrite(PA_EN_PIN,LOW);   // amp off until ready
+  Wire.begin(CODEC_SDA_PIN,CODEC_SCL_PIN,100000);
+  if(!es8311Probe()){
+    Serial.println("[AUDIO] ES8311 not found at 0x18 (check I2C) — audio off");
+    audioReady=false; return;
+  }
+  // minimal ES8311 playback init (MCLK provided by I2S on pin 38)
+  es8311W(0x00,0x1F); delay(20); es8311W(0x00,0x00); delay(10);
+  es8311W(0x01,0x30); es8311W(0x02,0x10); es8311W(0x03,0x10); es8311W(0x16,0x24);
+  es8311W(0x04,0x10); es8311W(0x05,0x00); es8311W(0x0B,0x00); es8311W(0x0C,0x00);
+  es8311W(0x10,0x1F); es8311W(0x11,0x7F); es8311W(0x00,0x80);
+  es8311W(0x0D,0x01); es8311W(0x0E,0x02); es8311W(0x12,0x00); es8311W(0x13,0x10);
+  es8311W(0x32,0xBF); es8311W(0x37,0x08); es8311W(0x44,0x08); es8311W(0x45,0x00);
+
+  i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  if(i2s_new_channel(&cc,&i2sTx,NULL)!=ESP_OK){audioReady=false;return;}
+  i2s_std_config_t sc = {
+    .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_RATE),
+    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+    .gpio_cfg = { .mclk=(gpio_num_t)I2S_MCLK_PIN, .bclk=(gpio_num_t)I2S_BCLK_PIN,
+                  .ws=(gpio_num_t)I2S_WS_PIN, .dout=(gpio_num_t)I2S_DOUT_PIN,
+                  .din=I2S_GPIO_UNUSED, .invert_flags={false,false,false} },
+  };
+  if(i2s_channel_init_std_mode(i2sTx,&sc)!=ESP_OK){audioReady=false;return;}
+  i2s_channel_enable(i2sTx);
+  digitalWrite(PA_EN_PIN,HIGH);   // amp on
+  audioReady=true;
+  Serial.println("[AUDIO] ES8311 + I2S ready");
+}
+void audioTone(int freq,int ms,float vol){
+  if(!audioReady)return;
+  long total=(long)AUDIO_RATE*ms/1000; int16_t buf[256];
+  float ph=0, inc=2.0f*PI*freq/AUDIO_RATE; long done=0;
+  while(done<total){
+    int n=(int)min((long)256,total-done);
+    for(int i=0;i<n;i++){buf[i]=(int16_t)(sinf(ph)*32767.0f*vol); ph+=inc; if(ph>2*PI)ph-=2*PI;}
+    size_t wr; i2s_channel_write(i2sTx,buf,n*sizeof(int16_t),&wr,100);
+    done+=n;
+  }
+}
+void audioGap(int ms){
+  if(!audioReady)return;
+  long total=(long)AUDIO_RATE*ms/1000; int16_t z[256]={0}; long done=0;
+  while(done<total){int n=(int)min((long)256,total-done);size_t wr;i2s_channel_write(i2sTx,z,n*sizeof(int16_t),&wr,100);done+=n;}
+}
+void audioBoot(){ audioTone(880,120,0.5f); audioTone(1320,150,0.5f); }
+// kind: 0 camera/tracker, 1 following, 2 approaching
+void audioAlert(int kind){
+  if(!audioReady)return;
+  if(kind==1){ for(int i=0;i<3;i++){audioTone(1500,150,0.85f);audioGap(70);} }      // urgent triple
+  else if(kind==2){ audioTone(1150,180,0.75f);audioGap(60);audioTone(1600,180,0.75f);} // rising couplet
+  else { audioTone(1000,200,0.75f);audioGap(60);audioTone(1000,200,0.75f); }          // double beep
+}
+#endif // ENABLE_AUDIO
+
 // ---------------- TFT ----------------
 #if ENABLE_TFT
 bool isFollowing(const Sighting* s){return s->mobileFlag||s->approachFlag;}
@@ -273,24 +359,40 @@ void drawScreen(){
   tft.printf("seen:%d GPS:%s SD:%s",deviceCount,gpsFix?"Y":"N",sdReady?"Y":"N");
 }
 void tftAlertFlash(){tft.fillScreen(ST77XX_RED);delay(150);}
+// Full-screen alert that spells out the threat.
+void tftAlertScreen(const char* title,const Sighting* s){
+  tft.fillScreen(ST77XX_RED);
+  tft.setTextColor(ST77XX_WHITE,ST77XX_RED);
+  tft.setTextSize(3); tft.setCursor(8,12);  tft.print("! ALERT");
+  tft.setTextSize(2); tft.setCursor(8,56);  tft.print(title);
+  tft.setTextSize(1);
+  tft.setCursor(8,92);  tft.printf("%s   %d dB", s->label, s->bestRssi);
+  tft.setCursor(8,108); tft.printf("%s  %s", s->isBle?"BLE":"WIFI", macToStr(s->mac).c_str());
+  tft.setCursor(8,132); tft.print(getTimestamp());
+  delay(1400);
+}
 #endif
 
 // ---------------- alerts ----------------
-void localAlert(){
-  if(!alertsEnabled)return;
-  for(int i=0;i<6;i++){digitalWrite(ALERT_LED_PIN,HIGH);
-#if ENABLE_BUZZER
-    tone(BUZZER_PIN,2200,80);
-#endif
-    delay(90);digitalWrite(ALERT_LED_PIN,LOW);delay(90);}
+void ledBlink(){
+  if(ALERT_LED_PIN<0)return;
+  for(int i=0;i<6;i++){digitalWrite(ALERT_LED_PIN,HIGH);delay(90);digitalWrite(ALERT_LED_PIN,LOW);delay(90);}
 }
 void raiseAlert(const Sighting* s,const char* reason){
   Serial.printf("*** ALERT: %s %s %s [%s] rssi=%d @ %.6f,%.6f %s\n",
     reason,s->isBle?"BLE":"WIFI",macToStr(s->mac).c_str(),s->label,s->bestRssi,curLat,curLon,getTimestamp().c_str());
+  if(!alertsEnabled)return;
+  int kind = s->mobileFlag?1 : (s->approachFlag?2:0);
+  const char* title = s->mobileFlag    ? "FOLLOWING YOU"
+                    : s->approachFlag  ? "APPROACHING YOU"
+                                       : "CAMERA / TRACKER";
 #if ENABLE_TFT
-  if(alertsEnabled)tftAlertFlash();
+  tftAlertScreen(title,s);
 #endif
-  localAlert();
+#if ENABLE_AUDIO
+  audioAlert(kind);
+#endif
+  ledBlink();
 }
 
 // ---------------- record + log ----------------
@@ -429,11 +531,15 @@ bool handleReview(String c){
   if(c=="gps"){Serial.printf("GPS fix=%s lat=%.6f lon=%.6f sats=%d\n",gpsFix?"yes":"no",curLat,curLon,gps.satellites.isValid()?gps.satellites.value():0);return true;}
   if(c=="save"){saveTable();Serial.println("Saved.");return true;}
   if(c=="clear"){deviceCount=0;saveTable();Serial.println("Cleared.");return true;}
-  if(c=="testalert"){bool a=alertsEnabled;alertsEnabled=true;localAlert();
+  if(c=="testalert"){
 #if ENABLE_TFT
     tftAlertFlash();
 #endif
-    alertsEnabled=a;Serial.println("Test alert fired.");return true;}
+#if ENABLE_AUDIO
+    audioAlert(0);
+#endif
+    ledBlink();
+    Serial.println("Test alert fired (screen + speaker + LED).");return true;}
   return false;
 }
 void executeCommand(String rawCmd){    // your XOR + history path (kept)
@@ -479,7 +585,7 @@ void setup(){
   esp_task_wdt_add(NULL);
 #endif
 
-  pinMode(ALERT_LED_PIN,OUTPUT); digitalWrite(ALERT_LED_PIN,LOW);
+  if(ALERT_LED_PIN>=0){pinMode(ALERT_LED_PIN,OUTPUT);digitalWrite(ALERT_LED_PIN,LOW);}
 
 #if ENABLE_TFT
   pinMode(TFT_BL,OUTPUT); digitalWrite(TFT_BL,HIGH);   // backlight on
@@ -508,6 +614,11 @@ void setup(){
   pBLEScan=BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100); pBLEScan->setWindow(99);
+
+#if ENABLE_AUDIO
+  audioInit();
+  if(audioReady) audioBoot();    // startup chime confirms the speaker works
+#endif
 
   Serial.println("Guardian Detector ready. Type 'help'.");
 }

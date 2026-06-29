@@ -63,10 +63,15 @@ Pins below are taken from LAFVIN's own board source (the display is **ST7789**,
 | TFT DC              | 39   |                                    |
 | TFT RST             | 4    |                                    |
 | TFT Backlight       | 42   | driven HIGH = on                   |
-| Builtin LED (alert) | 48   | TFT flash is the primary alert     |
-| Buzzer (optional)   | 21   | `ENABLE_BUZZER 1`                  |
+| Speaker amp enable  | 48   | **PA enable, NOT an LED** (ES8311) |
+| Codec I2C SDA/SCL   | 1/2  | ES8311 @ 0x18                      |
+| I2S MCLK/BCLK/WS/DOUT| 38/14/13/45 | speaker audio               |
 | GPS (optional)      | 16/17| UART, 9600 baud                    |
 | microSD (optional)  | 5    | not in base kit                    |
+
+> ⚠ GPIO 48 on this board is the **speaker amplifier enable**, not a status LED.
+> The sketch drives it for audio. If you want a discrete blink LED, wire one to a
+> free GPIO and set `ALERT_LED_PIN` to it (default `-1` = none).
 
 > If the screen is rotated/upside-down, change `tft.setRotation(3)` to `1`. If
 > colours look inverted, toggle `tft.invertDisplay(true/false)` in `setup()`.
@@ -111,14 +116,27 @@ timestamp,lat,lon,type,mac,label,rssi,hits,flags
     i.e. it's been closing on you for a while, not a one-off spike. This is how
     "something is following me" works on the bare kit.
 
-### Alerts
+### Alerts (screen + speaker)
 
-When a device is **first flagged**, you're warned immediately — no need to read
-the SD card:
+When a device is **first flagged**, you're warned three ways at once — no need to
+read the SD card:
 
-- **TFT** flashes red and lists the device; **LED** blinks (+ optional buzzer).
-- Each device alerts **once** so you aren't spammed on every re-sighting.
-- `testalert` (serial) fires the LED/buzzer to verify wiring.
+1. **Full-screen TFT alert** that spells out the threat in big text —
+   `! ALERT` + `FOLLOWING YOU` / `APPROACHING YOU` / `CAMERA / TRACKER`, with the
+   device label, MAC, signal, and time.
+2. **Speaker tones** through the kit's ES8311 codec — distinct patterns per
+   threat (urgent triple = following, rising couplet = approaching, double-beep =
+   camera/tracker). A startup chime on boot confirms the speaker works.
+3. Optional discrete **LED** if you wired one (`ALERT_LED_PIN`).
+
+Each device alerts **once** so you aren't spammed on every re-sighting.
+`testalert` (serial) fires the screen + speaker so you can verify audio.
+
+> **Audio needs no extra libraries** — it uses the ESP32 core's built-in I2S
+> driver, so the sketch compiles as-is. If you hear nothing, type `testalert`
+> and watch Serial: `[AUDIO] ES8311 not found` means the codec didn't ACK on
+> I2C (check the board), otherwise the ES8311 register init may need a tweak.
+> Set `ENABLE_AUDIO 0` to build silent (screen + serial only).
 
 ### Reboot-persistent memory *(needs SD)*
 
@@ -135,7 +153,7 @@ the device still works fully — it just starts fresh each boot.
 | `gps`       | Current GPS fix / coordinates / satellites      |
 | `save`      | Force-save the tracking table (if SD present)   |
 | `clear`     | Reset the table (SD CSV log is kept)            |
-| `testalert` | Fire the LED/buzzer                             |
+| `testalert` | Fire the screen alert + speaker (verify audio)  |
 | `help`      | Show commands                                   |
 
 ---
