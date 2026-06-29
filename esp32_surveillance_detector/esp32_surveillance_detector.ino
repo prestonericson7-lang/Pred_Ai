@@ -30,6 +30,9 @@
 #if ENABLE_TFT
   #include <Adafruit_GFX.h>
   #include <Adafruit_ST7789.h>
+  #ifndef ST77XX_ORANGE
+  #define ST77XX_ORANGE 0xFC00
+  #endif
   #define TFT_MOSI 40
   #define TFT_SCLK 41
   #define TFT_CS   47
@@ -88,7 +91,14 @@
 #define MAX_DEVICES   180
 #define GPS_MAX_AGE_MS 10000UL    // ignore GPS fixes older than this
 #define DEVICE_EXPIRE_MS 90000UL  // hide/forget devices not seen for this long
-#define STRONG_UNKNOWN_DB -55     // unknown device this loud + repeated => flag
+// STRONG UNKNOWN: stricter so your own phone/car BT doesn't false-alarm.
+#define STRONG_UNKNOWN_DB    -45  // must be this loud (very close)...
+#define STRONG_UNKNOWN_HITS   8   // ...seen this many times...
+#define STRONG_UNKNOWN_CYC    5   // ...across this many scan cycles.
+// Alerts re-nag: a persistent threat re-alerts every ALERT_REPEAT_MS instead of
+// only once, but never faster than ALERT_COOLDOWN_MS.
+#define ALERT_COOLDOWN_MS  8000UL
+#define ALERT_REPEAT_MS    60000UL
 
 // Receive-only scanning: passive WiFi (no probe requests) + passive BLE (no scan
 // requests). Truly listen-only — nothing we do transmits or reveals us.
@@ -112,6 +122,7 @@ HardwareSerial gpsSerial(1);
 bool activeMode = false;        // "shield/activate" word (no transmit in this build)
 bool scanningEnabled = true;
 bool alertsEnabled = true;
+bool stealthMode = false;       // blank screen + mute + slower scan (don't be seen)
 unsigned long lastLogTime = 0;
 unsigned long lastScan = 0;
 uint16_t scanCycle = 0;
@@ -209,8 +220,9 @@ struct Sighting {
   bool     mobileFlag;    // GPS: moved with you
   bool     approachFlag;  // signal rose over time
   bool     vendorFlag;    // matched vendor/keyword (shown)
+  bool     strongUnknownFlag; // very close + repeated unknown
   bool     alertWorthy;   // camera-grade vendor or following (alerts)
-  bool     alerted;
+  uint32_t lastAlertMs;   // last time we alerted on this device (re-nag timer)
   char     label[24];
 };
 Sighting devices[MAX_DEVICES];
@@ -267,6 +279,12 @@ void scrambleGPS(){
 }
 void logStatusToSD(){
   scrambleGPS();
+  // periodic heartbeat to serial (heap watch catches slow leaks over a long drive)
+  int fresh=0,flagged=0;
+  for(int i=0;i<deviceCount;i++){ if(!isFresh(&devices[i]))continue; fresh++; if(devices[i].alertWorthy)flagged++; }
+  Serial.printf("STATUS seen=%d fresh=%d flagged=%d alerts=%s stealth=%s heap=%u/%u\n",
+    deviceCount,fresh,flagged,alertsEnabled?"ON":"MUTE",stealthMode?"ON":"OFF",
+    (unsigned)ESP.getFreeHeap(),(unsigned)ESP.getMinFreeHeap());
 #if ENABLE_SD
   if(!sdReady)return;
   logFile=SD.open("/guardian.log",FILE_APPEND);
@@ -414,17 +432,21 @@ void tftBanner(const char* t,uint16_t c){tft.fillRect(0,0,tft.width(),22,c);tft.
 void tftWake(){ if(tftDimmed){digitalWrite(TFT_BL,HIGH);tftDimmed=false;} lastTFTActivity=millis(); }
 void tftDim(){ if(!tftDimmed){digitalWrite(TFT_BL,LOW);tftDimmed=true;} }
 void drawScreen(){
+  if(stealthMode){ tft.fillScreen(ST77XX_BLACK); return; }   // dark = don't be seen
   tftWake();
-  int fl=0; for(int i=0;i<deviceCount;i++) if(isFresh(&devices[i])&&(devices[i].vendorFlag||isFollowing(&devices[i])))fl++;
+  int fl=0; for(int i=0;i<deviceCount;i++) if(isFresh(&devices[i])&&devices[i].alertWorthy)fl++;
   tft.fillScreen(ST77XX_BLACK);
   char h[40]; snprintf(h,sizeof(h),"Pred_Ai  %d flagged",fl);
   tftBanner(h, fl?ST77XX_RED:ST77XX_GREEN);
   tft.setTextSize(1); int y=28;
   for(int i=0;i<deviceCount&&y<tft.height()-12;i++){
-    Sighting* s=&devices[i]; if(!isFresh(s))continue; bool f=isFollowing(s);
-    if(!(s->vendorFlag||f))continue;
-    tft.setTextColor(f?ST77XX_RED:ST77XX_YELLOW,ST77XX_BLACK);
-    tft.setCursor(2,y); tft.printf("%-6s %-15s %ddB",f?"FOLLOW":"VENDOR",s->label,s->bestRssi); y+=11;
+    Sighting* s=&devices[i]; if(!isFresh(s)||!s->alertWorthy)continue;
+    const char* tag; uint16_t col;
+    if(isFollowing(s)){ tag=s->mobileFlag?"FOLLOW":"APPRCH"; col=ST77XX_RED; }
+    else if(s->strongUnknownFlag){ tag="STRONG"; col=ST77XX_ORANGE; }
+    else { tag="VENDOR"; col=ST77XX_YELLOW; }
+    tft.setTextColor(col,ST77XX_BLACK);
+    tft.setCursor(2,y); tft.printf("%-6s %-15s %ddB",tag,s->label,s->bestRssi); y+=11;
   }
   tft.setTextColor(ST77XX_WHITE,ST77XX_BLACK); tft.setCursor(2,tft.height()-10);
   tft.printf("seen:%d GPS:%s SD:%s",deviceCount,gpsFix?"Y":"N",sdReady?"Y":"N");
@@ -449,10 +471,13 @@ void ledBlink(){
   if(ALERT_LED_PIN<0)return;
   for(int i=0;i<6;i++){digitalWrite(ALERT_LED_PIN,HIGH);delay(90);digitalWrite(ALERT_LED_PIN,LOW);delay(90);}
 }
-void raiseAlert(const Sighting* s,const char* reason){
-  Serial.printf("*** ALERT: %s %s %s [%s] rssi=%d @ %.6f,%.6f %s\n",
-    reason,s->isBle?"BLE":"WIFI",macToStr(s->mac).c_str(),s->label,s->bestRssi,curLat,curLon,getTimestamp().c_str());
-  if(!alertsEnabled)return;
+void raiseAlert(Sighting* s,const char* reason){
+  uint32_t now=millis();
+  if(s->lastAlertMs && (now - s->lastAlertMs) < ALERT_COOLDOWN_MS) return;  // don't spam
+  s->lastAlertMs = now;
+  Serial.printf("*** ALERT%s: %s %s %s [%s] rssi=%d @ %.6f,%.6f %s\n",
+    alertsEnabled?"":" (muted)",reason,s->isBle?"BLE":"WIFI",macToStr(s->mac).c_str(),s->label,s->bestRssi,curLat,curLon,getTimestamp().c_str());
+  if(!alertsEnabled||stealthMode)return;
   int kind = s->mobileFlag?1 : (s->approachFlag?2:0);
   const char* title = s->mobileFlag    ? "FOLLOWING YOU"
                     : s->approachFlag  ? "APPROACHING YOU"
@@ -534,23 +559,26 @@ void recordDevice(const uint8_t* mac,bool isBle,int rssi,const char* label,int r
      (s->emaRssi - s->firstRssi)>=APPROACH_DB && s->bestRssi>-75)
     s->approachFlag=true;
 
-  // STRONG UNKNOWN: not a known vendor, but very close and seen repeatedly —
-  // catches threats that don't advertise a camera/tracker name.
-  bool strongUnknown=false;
-  if(risk==0 && s->hits>=3 && s->bestRssi>STRONG_UNKNOWN_DB){
-    strongUnknown=true;
+  // STRONG UNKNOWN: not a known vendor, but very close AND seen many times across
+  // several cycles — strict thresholds so your own phone/car BT doesn't trip it.
+  if(risk==0 && s->hits>=STRONG_UNKNOWN_HITS && s->cycles>=STRONG_UNKNOWN_CYC && s->bestRssi>=STRONG_UNKNOWN_DB){
+    s->strongUnknownFlag=true;
     if(!s->vendorFlag) safeCopy(s->label, isBle?"strong unknown(BLE)":"strong unknown(WiFi)", sizeof(s->label));
   }
 
-  bool following=s->mobileFlag||s->approachFlag;
-  s->alertWorthy = (risk>=2) || following || strongUnknown;
+  bool wasWorthy = s->alertWorthy;
+  s->alertWorthy = (risk>=2) || s->mobileFlag || s->approachFlag || s->strongUnknownFlag;
   logSighting(s,rssi);
-  if(s->alertWorthy && !s->alerted){
-    raiseAlert(s, s->mobileFlag?"FOLLOWING (moved with you)"
-                : s->approachFlag?"APPROACHING (signal rising)"
-                : strongUnknown?"strong unknown nearby"
-                : "camera-grade device");
-    s->alerted=true;
+  // Alert when it first becomes a threat, then re-nag every ALERT_REPEAT_MS so a
+  // device that keeps following you doesn't go silent after one beep.
+  if(s->alertWorthy){
+    bool became = !wasWorthy && s->alertWorthy;
+    if(became || (now - s->lastAlertMs) > ALERT_REPEAT_MS){
+      raiseAlert(s, s->mobileFlag?"FOLLOWING (moved with you)"
+                  : s->approachFlag?"APPROACHING (signal rising)"
+                  : s->strongUnknownFlag?"strong unknown nearby"
+                  : "camera-grade device");
+    }
   }
 }
 
@@ -673,8 +701,13 @@ void printDevice(const Sighting* s){
 }
 bool handleReview(String c){
   c.trim(); c.toLowerCase();
-  if(c=="help"||c=="?"){Serial.println("shield | status | mute | list | flagged | gps | say <text> | save | clear | testalert");return true;}
+  if(c=="help"||c=="?"){Serial.println("shield | status | mute | stealth | list | flagged | gps | say <text> | save | clear | testalert");return true;}
   if(c=="shield"||c=="runall"||c=="activate"){ activateShield(); return true; }
+  if(c=="stealth"){ stealthMode=!stealthMode; alertsEnabled=!stealthMode;
+#if ENABLE_TFT
+    if(stealthMode) tft.fillScreen(ST77XX_BLACK); else drawScreen();
+#endif
+    Serial.printf("Stealth %s (screen %s, alerts %s)\n",stealthMode?"ON":"OFF",stealthMode?"dark":"on",alertsEnabled?"on":"muted"); return true; }
   if(c=="status"||c=="sum"){ speakStatus(); return true; }
   if(c=="mute"){ alertsEnabled=!alertsEnabled; Serial.printf("Alerts %s\n",alertsEnabled?"ON":"OFF"); return true; }
   if(c.startsWith("say ")){ String t=c.substring(4);
@@ -817,7 +850,8 @@ void loop(){
 #if ENABLE_TFT
   if(!tftDimmed && now-lastTFTActivity>45000) tftDim();   // dim after 45s idle
 #endif
-  if(scanningEnabled && now-lastScan>SCAN_PERIOD){
+  unsigned long scanEvery = stealthMode ? (SCAN_PERIOD*2) : SCAN_PERIOD;  // stealth = quieter
+  if(scanningEnabled && now-lastScan>scanEvery){
     lastScan=now; scanCycle++;
     scanWifi(); performPassiveScan(); saveTable();
 #if ENABLE_TFT
