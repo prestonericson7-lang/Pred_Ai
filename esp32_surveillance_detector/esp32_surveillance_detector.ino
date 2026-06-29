@@ -86,7 +86,9 @@
 #define BLE_SCAN_SECS 4
 #define SCAN_PERIOD   12000UL
 #define MAX_DEVICES   180
-#define GPS_MAX_AGE_MS 10000UL   // ignore GPS fixes older than this
+#define GPS_MAX_AGE_MS 10000UL    // ignore GPS fixes older than this
+#define DEVICE_EXPIRE_MS 90000UL  // hide/forget devices not seen for this long
+#define STRONG_UNKNOWN_DB -55     // unknown device this loud + repeated => flag
 
 // Receive-only scanning: passive WiFi (no probe requests) + passive BLE (no scan
 // requests). Truly listen-only — nothing we do transmits or reveals us.
@@ -128,6 +130,10 @@ bool sdReady = false;
 bool gpsFix = false;
 double curLat = 0.0, curLon = 0.0;
 BLEScan* pBLEScan = nullptr;
+
+// TFT auto-dim (saves battery on a portable build)
+bool tftDimmed = false;
+uint32_t lastTFTActivity = 0;
 
 // ---------------- vendor OUI table (camera / IoT / tracker) ----------------
 // risk: 2 = camera-likely, 1 = IoT/tracker/info. Expand from the IEEE registry
@@ -240,6 +246,8 @@ int matchKeyword(const String& hay,const char** table,int count){
   for(int i=0;i<count;i++) if(hay.indexOf(table[i])>=0) return i;
   return -1;
 }
+// a device is "fresh" if seen recently (stale ones drop off screen/counts)
+bool isFresh(const Sighting* s){ return (uint32_t)(millis()-s->lastSeenMs) <= DEVICE_EXPIRE_MS; }
 
 // ---------------- XOR crypto + history (kept) ----------------
 String encryptCommand(String cmd){String e=cmd;for(unsigned i=0;i<e.length();i++)e[i]=e[i]^KEY;return e;}
@@ -403,14 +411,17 @@ void voiceSay(const char* text){
 #if ENABLE_TFT
 bool isFollowing(const Sighting* s){return s->mobileFlag||s->approachFlag;}
 void tftBanner(const char* t,uint16_t c){tft.fillRect(0,0,tft.width(),22,c);tft.setTextColor(ST77XX_BLACK,c);tft.setTextSize(2);tft.setCursor(4,4);tft.print(t);}
+void tftWake(){ if(tftDimmed){digitalWrite(TFT_BL,HIGH);tftDimmed=false;} lastTFTActivity=millis(); }
+void tftDim(){ if(!tftDimmed){digitalWrite(TFT_BL,LOW);tftDimmed=true;} }
 void drawScreen(){
-  int fl=0; for(int i=0;i<deviceCount;i++) if(devices[i].vendorFlag||isFollowing(&devices[i]))fl++;
+  tftWake();
+  int fl=0; for(int i=0;i<deviceCount;i++) if(isFresh(&devices[i])&&(devices[i].vendorFlag||isFollowing(&devices[i])))fl++;
   tft.fillScreen(ST77XX_BLACK);
   char h[40]; snprintf(h,sizeof(h),"Pred_Ai  %d flagged",fl);
   tftBanner(h, fl?ST77XX_RED:ST77XX_GREEN);
   tft.setTextSize(1); int y=28;
   for(int i=0;i<deviceCount&&y<tft.height()-12;i++){
-    Sighting* s=&devices[i]; bool f=isFollowing(s);
+    Sighting* s=&devices[i]; if(!isFresh(s))continue; bool f=isFollowing(s);
     if(!(s->vendorFlag||f))continue;
     tft.setTextColor(f?ST77XX_RED:ST77XX_YELLOW,ST77XX_BLACK);
     tft.setCursor(2,y); tft.printf("%-6s %-15s %ddB",f?"FOLLOW":"VENDOR",s->label,s->bestRssi); y+=11;
@@ -447,6 +458,7 @@ void raiseAlert(const Sighting* s,const char* reason){
                     : s->approachFlag  ? "APPROACHING YOU"
                                        : "CAMERA / TRACKER";
 #if ENABLE_TFT
+  tftWake();
   tftAlertScreen(title,s);
 #endif
 #if ENABLE_AUDIO
@@ -500,14 +512,17 @@ void recordDevice(const uint8_t* mac,bool isBle,int rssi,const char* label,int r
     s->firstRssi=rssi; s->bestRssi=rssi; s->emaRssi=rssi;
     s->firstSeenMs=now; s->firstLat=curLat; s->firstLon=curLon;
     s->lastCycle=scanCycle-1;
-    strncpy(s->label,label,sizeof(s->label)-1);
+    safeCopy(s->label,label,sizeof(s->label));
   }
   s->hits++;
   s->lastSeenMs=now; s->lastLat=curLat; s->lastLon=curLon;
   if(rssi>s->bestRssi)s->bestRssi=rssi;
   s->emaRssi += EMA_ALPHA*(rssi - s->emaRssi);
   if(s->lastCycle!=scanCycle){s->cycles++;s->lastCycle=scanCycle;}
-  if(risk>=1){s->vendorFlag=true; if(label[0])strncpy(s->label,label,sizeof(s->label)-1);}
+  // Only camera-grade (risk 2) becomes a flagged vendor; risk-1 (Apple/Samsung/
+  // Espressif) just gets a label so your own gear isn't treated as a threat.
+  if(risk>=2){s->vendorFlag=true; if(label[0])safeCopy(s->label,label,sizeof(s->label));}
+  else if(risk==1 && label[0]) safeCopy(s->label,label,sizeof(s->label));
 
   // FOLLOWING (GPS): moved with you, sustained over cycles + time
   if(gpsFix && s->cycles>=APPROACH_MIN_CYC && (now-s->firstSeenMs)>=APPROACH_MIN_MS &&
@@ -516,15 +531,25 @@ void recordDevice(const uint8_t* mac,bool isBle,int rssi,const char* label,int r
 
   // APPROACHING (no GPS): smoothed signal climbed, sustained over cycles + time
   if(s->cycles>=APPROACH_MIN_CYC && (now-s->firstSeenMs)>=APPROACH_MIN_MS &&
-     (s->emaRssi - s->firstRssi)>=APPROACH_DB)
+     (s->emaRssi - s->firstRssi)>=APPROACH_DB && s->bestRssi>-75)
     s->approachFlag=true;
 
+  // STRONG UNKNOWN: not a known vendor, but very close and seen repeatedly —
+  // catches threats that don't advertise a camera/tracker name.
+  bool strongUnknown=false;
+  if(risk==0 && s->hits>=3 && s->bestRssi>STRONG_UNKNOWN_DB){
+    strongUnknown=true;
+    if(!s->vendorFlag) safeCopy(s->label, isBle?"strong unknown(BLE)":"strong unknown(WiFi)", sizeof(s->label));
+  }
+
   bool following=s->mobileFlag||s->approachFlag;
-  s->alertWorthy = (risk>=2) || following;
+  s->alertWorthy = (risk>=2) || following || strongUnknown;
   logSighting(s,rssi);
   if(s->alertWorthy && !s->alerted){
-    raiseAlert(s, following ? (s->mobileFlag?"FOLLOWING (moved with you)":"APPROACHING (signal rising)")
-                            : "camera-grade device");
+    raiseAlert(s, s->mobileFlag?"FOLLOWING (moved with you)"
+                : s->approachFlag?"APPROACHING (signal rising)"
+                : strongUnknown?"strong unknown nearby"
+                : "camera-grade device");
     s->alerted=true;
   }
 }
@@ -587,6 +612,7 @@ void performPassiveScan(){   // original name kept; real BLE detection
 void speakStatus(){
   int cams=0,trk=0,follow=0;
   for(int i=0;i<deviceCount;i++){ Sighting* s=&devices[i];
+    if(!isFresh(s)) continue;
     if(s->mobileFlag||s->approachFlag) follow++;
     else if(s->vendorFlag){ if(s->isBle) trk++; else cams++; }
   }
@@ -594,6 +620,7 @@ void speakStatus(){
   snprintf(phrase,sizeof(phrase),"Status. %d cameras. %d trackers. %d devices following you.",cams,trk,follow);
   Serial.println(phrase);
 #if ENABLE_TFT
+  tftWake();
   tft.fillScreen(ST77XX_BLACK); tftBanner("STATUS", follow?ST77XX_RED:ST77XX_GREEN);
   tft.setTextColor(ST77XX_WHITE,ST77XX_BLACK); tft.setTextSize(2);
   tft.setCursor(8,40);  tft.printf("Cameras:  %d",cams);
@@ -610,6 +637,7 @@ void activateShield(){
   scanningEnabled=true; alertsEnabled=true;
   Serial.println("SHIELD ACTIVATED — scanning + alerts ON");
 #if ENABLE_TFT
+  tftWake();
   tft.fillScreen(ST77XX_BLACK); tftBanner("SHIELD ON",ST77XX_GREEN); delay(300);
 #endif
 #if ENABLE_AUDIO
@@ -622,6 +650,10 @@ void activateShield(){
 void pollButtons(){
   static uint32_t last=0;
   if(millis()-last<350) return;
+  bool any = (digitalRead(BTN_SHIELD_PIN)==LOW)||(digitalRead(BTN_STATUS_PIN)==LOW)||(digitalRead(BTN_MUTE_PIN)==LOW);
+#if ENABLE_TFT
+  if(any) tftWake();
+#endif
   if(digitalRead(BTN_SHIELD_PIN)==LOW){ last=millis(); activateShield(); }
   else if(digitalRead(BTN_STATUS_PIN)==LOW){ last=millis(); speakStatus(); }
   else if(digitalRead(BTN_MUTE_PIN)==LOW){ last=millis(); alertsEnabled=!alertsEnabled;
@@ -764,6 +796,8 @@ void setup(){
   if(audioReady) audioBoot();    // startup chime confirms the speaker works
 #endif
 
+  lastScan = millis() - SCAN_PERIOD;   // scan immediately on boot (no 12s wait)
+  lastTFTActivity = millis();
   Serial.println("Guardian Detector ready. Type 'help'.");
 }
 
@@ -780,6 +814,9 @@ void loop(){
   }
 #endif
   unsigned long now=millis();
+#if ENABLE_TFT
+  if(!tftDimmed && now-lastTFTActivity>45000) tftDim();   // dim after 45s idle
+#endif
   if(scanningEnabled && now-lastScan>SCAN_PERIOD){
     lastScan=now; scanCycle++;
     scanWifi(); performPassiveScan(); saveTable();
