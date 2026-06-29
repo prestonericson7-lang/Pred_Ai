@@ -57,9 +57,10 @@
 // (Do NOT use 48: that's the audio amp.)
 #define ALERT_LED_PIN -1
 
-// Kit buttons for voice interaction (active-low).
-#define BTN_STATUS_PIN 0    // BOOT button: speak a status summary
-#define BTN_MUTE_PIN   19   // kit button: mute / unmute alerts
+// Kit task buttons (active-low). The mic is never used — buttons only RUN TASKS.
+#define BTN_SHIELD_PIN 0    // BOOT: RUN ALL — activate the shield (scan+alerts+report)
+#define BTN_STATUS_PIN 19   // speak a status summary
+#define BTN_MUTE_PIN   20   // mute / unmute alerts
 
 #if ENABLE_AUDIO && (ESP_IDF_VERSION_MAJOR < 5)
   #warning "Audio requires ESP32 Arduino core 3.x (IDF5) — disabling audio."
@@ -378,7 +379,10 @@ I2SSpeechSink* speechSink = nullptr;
 // Speak the phrase if voice is enabled+ready; otherwise play the tone pattern.
 void alertSound(int kind,const char* phrase){
 #if ENABLE_VOICE
-  if(audioReady && speechSink){ ESP8266SAM sam; sam.Say(speechSink, phrase); return; }
+  if(audioReady && speechSink){            // attention chirp, then speak the alert
+    audioTone(1500,120,0.8f); audioGap(60);
+    ESP8266SAM sam; sam.Say(speechSink, phrase); return;
+  }
 #else
   (void)phrase;
 #endif
@@ -601,11 +605,25 @@ void speakStatus(){
   voiceSay(phrase);
 #endif
 }
-// Buttons: BOOT = speak status, GPIO19 = mute/unmute. Debounced, active-low.
+// RUN ALL: arm the whole system, announce it, scan immediately, report.
+void activateShield(){
+  scanningEnabled=true; alertsEnabled=true;
+  Serial.println("SHIELD ACTIVATED — scanning + alerts ON");
+#if ENABLE_TFT
+  tft.fillScreen(ST77XX_BLACK); tftBanner("SHIELD ON",ST77XX_GREEN); delay(300);
+#endif
+#if ENABLE_AUDIO
+  voiceSay("Shield activated. Scanning for cameras and trackers.");
+#endif
+  scanCycle++; scanWifi(); performPassiveScan();   // instant readout, no waiting
+  speakStatus();
+}
+// Task buttons (debounced, active-low). Mic is never used — press = run a task.
 void pollButtons(){
   static uint32_t last=0;
   if(millis()-last<350) return;
-  if(digitalRead(BTN_STATUS_PIN)==LOW){ last=millis(); speakStatus(); }
+  if(digitalRead(BTN_SHIELD_PIN)==LOW){ last=millis(); activateShield(); }
+  else if(digitalRead(BTN_STATUS_PIN)==LOW){ last=millis(); speakStatus(); }
   else if(digitalRead(BTN_MUTE_PIN)==LOW){ last=millis(); alertsEnabled=!alertsEnabled;
     Serial.printf("Alerts %s\n",alertsEnabled?"ON":"OFF");
 #if ENABLE_AUDIO
@@ -623,7 +641,8 @@ void printDevice(const Sighting* s){
 }
 bool handleReview(String c){
   c.trim(); c.toLowerCase();
-  if(c=="help"||c=="?"){Serial.println("list | flagged | gps | status | say <text> | mute | save | clear | testalert");return true;}
+  if(c=="help"||c=="?"){Serial.println("shield | status | mute | list | flagged | gps | say <text> | save | clear | testalert");return true;}
+  if(c=="shield"||c=="runall"||c=="activate"){ activateShield(); return true; }
   if(c=="status"||c=="sum"){ speakStatus(); return true; }
   if(c=="mute"){ alertsEnabled=!alertsEnabled; Serial.printf("Alerts %s\n",alertsEnabled?"ON":"OFF"); return true; }
   if(c.startsWith("say ")){ String t=c.substring(4);
@@ -697,6 +716,7 @@ void setup(){
 #endif
 
   if(ALERT_LED_PIN>=0){pinMode(ALERT_LED_PIN,OUTPUT);digitalWrite(ALERT_LED_PIN,LOW);}
+  pinMode(BTN_SHIELD_PIN,INPUT_PULLUP);
   pinMode(BTN_STATUS_PIN,INPUT_PULLUP);
   pinMode(BTN_MUTE_PIN,INPUT_PULLUP);
 

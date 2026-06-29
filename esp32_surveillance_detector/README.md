@@ -191,20 +191,26 @@ the device still works fully — it just starts fresh each boot.
 | `testalert` | Fire the screen alert + speaker (verify audio)  |
 | `help`      | Show commands                                   |
 
-### Voice interaction (offline, no internet)
+### Spoken alerts + task buttons (offline, no mic)
 
-Voice is **on** (`ENABLE_VOICE 1`). It speaks alerts and status aloud through the
-kit speaker, and you drive it without a phone or cloud:
+Voice is **on** (`ENABLE_VOICE 1`): alerts are **spoken aloud** ("Warning, a
+tracker is following you") after a short attention chirp, so you never have to
+look at the screen while driving. **The mic is never used — nothing listens.**
+The three kit buttons just run tasks:
 
-- **BOOT button** → speaks a status summary ("3 cameras, 1 tracker, 0 following").
-- **GPIO19 button** → mute / unmute.
-- Serial `say <text>` → it speaks whatever you type; `status` / `mute` too.
+| Button        | Action                                                        |
+|---------------|---------------------------------------------------------------|
+| **BOOT (G0)** | **SHIELD / RUN ALL** — arm scanning + alerts, announce it, scan now, speak status |
+| **G19**       | Speak the status summary (cameras / trackers / following)     |
+| **G20**       | Mute / unmute alerts                                           |
+
+Same actions over USB serial: `shield`, `status`, `mute` (plus `say <text>` to
+test the voice).
 
 > Requires the **ESP8266SAM** library (Library Manager — pulls in ESP8266Audio).
-> If it ever won't compile or stays silent, set `ENABLE_VOICE 0` to fall back to
-> the tone alerts. Full two-way conversation (like the kit's cloud chatbot) needs
-> internet and would broadcast constantly — left out on purpose so the unit stays
-> dark while it watches.
+> If it won't compile or stays silent, set `ENABLE_VOICE 0` to fall back to tone
+> alerts. There is no cloud and no microphone in this build — the unit only ever
+> speaks *to you*, and stays dark on the air while it watches.
 
 ---
 
