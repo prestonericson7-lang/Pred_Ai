@@ -80,12 +80,28 @@ Pins below are taken from LAFVIN's own board source (the display is **ST7789**,
 
 1. Arduino IDE with the **ESP32 board package** (core **3.x**), board = **ESP32-S3**,
    **PSRAM enabled** (module is N16R8 = 16 MB flash / 8 MB PSRAM).
-2. Install libraries: **TinyGPSPlus**, **Adafruit GFX**, **Adafruit ST7789**.
+2. **Bare-kit libraries:** just **Adafruit GFX** + **Adafruit ST7789**. Audio uses
+   the core's built-in I2S (no library). GPS/SD are **off by default**, so you do
+   *not* need TinyGPSPlus unless you enable GPS.
 3. Open `surveillance_detector.ino`, upload.
 4. Open Serial Monitor at **115200 baud**.
 
-> Set `ENABLE_TFT 0` to build headless (serial only) if you haven't installed the
-> Adafruit libraries yet. The watchdog auto-adapts to core 2.x vs 3.x.
+> **Optional hardware switches** at the top of the sketch:
+> - `ENABLE_GPS 1` — after wiring a UART GPS + installing **TinyGPSPlus** (turns on
+>   location stamping + the GPS "FOLLOWING" flag).
+> - `ENABLE_SD 1` — after wiring a microSD module (turns on CSV logging +
+>   reboot-persistent memory).
+> - `ENABLE_TFT 0` / `ENABLE_AUDIO 0` — build without screen / silent.
+>
+> The watchdog auto-adapts to core 2.x vs 3.x.
+
+### Truly receive-only
+
+Scanning is **passive**: WiFi listens for beacons without sending probe requests
+(`WIFI_PASSIVE_SCAN`), and BLE listens without scan requests (`BLE_ACTIVE_SCAN
+false`). The device never transmits — it can't give away your position while it
+watches. (AirTag/Tile/SmartTag detection still works passively, since those ride
+in the advertisement itself.)
 
 ---
 

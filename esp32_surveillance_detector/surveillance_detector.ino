@@ -1,27 +1,10 @@
-/*
- * Pred_Ai — Guardian Surveillance Detector (ESP32-S3 / LAFVIN AI Chatbot kit)
- * ===========================================================================
- * PASSIVE, RECEIVE-ONLY counter-surveillance scanner.
- *
- * Listens for nearby WiFi + BLE devices, flags likely cameras / IoT / trackers
- * by MAC vendor (OUI) AND by SSID/BLE-name keywords, GPS+time stamps them,
- * logs to SD, shows a live threat screen on the kit's ST7789 TFT, and warns
- * when a device is FOLLOWING you (GPS movement) or APPROACHING you (signal
- * rising over time). Keeps all original modules: watchdog, SD guardian.log,
- * GPS, XOR command crypto, command history, scramble, original command words.
- *
- * It only LISTENS. WiFi stays in station mode; BLE only scans. No transmit,
- * no AP, no advertising. The safety invariant: nothing calls WiFi.softAP() or
- * esp_wifi_set_mac() in a loop. Keep that true and it can only observe.
- *
- * Honest limits: only sees powered-on 2.4 GHz transmitters. The ESP32-S3 is
- * 2.4 GHz ONLY — it cannot hear 5 GHz cameras, wired/analog cameras, or
- * anything with its radio off. A flag means "look closer," not "confirmed."
- *
- * Verified LAFVIN ESP32-S3 AI Chatbot pin map (from vendor board source):
- *   TFT(ST7789): MOSI 40, SCLK 41, CS 47, DC 39, RST 4, Backlight 42
- *   Builtin LED 48 | Buttons 19/20, BOOT 0 | Audio I2S (codec) 12/13/14/38/45
- */
+// Pred_Ai Guardian — passive ESP32-S3 counter-surveillance scanner (LAFVIN kit).
+// Receive-only: listens for WiFi+BLE, flags cameras/trackers, screen+speaker alerts.
+// Bare kit needs only Adafruit GFX + Adafruit ST7789. GPS/SD are optional switches.
+
+// ---- optional hardware (leave 0 to run on the bare kit) ----
+#define ENABLE_GPS 0     // 1 after wiring a UART GPS + installing TinyGPSPlus
+#define ENABLE_SD  0     // 1 after wiring a microSD module
 
 #include <WiFi.h>
 #include "esp_wifi.h"
@@ -31,11 +14,16 @@
 #include <esp_random.h>
 #include <esp_task_wdt.h>
 #include <esp_idf_version.h>
-#include <SD.h>
 #include <SPI.h>
-#include <TinyGPS++.h>
-#include <HardwareSerial.h>
 #include <math.h>
+#include <string.h>
+#if ENABLE_SD
+  #include <SD.h>
+#endif
+#if ENABLE_GPS
+  #include <TinyGPS++.h>
+  #include <HardwareSerial.h>
+#endif
 
 // ---------------- 2.0" ST7789 TFT (kit display) ----------------
 #define ENABLE_TFT 1
@@ -93,6 +81,13 @@
 #define BLE_SCAN_SECS 4
 #define SCAN_PERIOD   12000UL
 #define MAX_DEVICES   180
+#define GPS_MAX_AGE_MS 10000UL   // ignore GPS fixes older than this
+
+// Receive-only scanning: passive WiFi (no probe requests) + passive BLE (no scan
+// requests). Truly listen-only — nothing we do transmits or reveals us.
+#define WIFI_PASSIVE_SCAN       true
+#define WIFI_SCAN_MS_PER_CHAN   250
+#define BLE_ACTIVE_SCAN         false
 
 // --- following / approaching tuning (raise thresholds = fewer false alarms) ---
 #define MOVE_METERS        75.0     // GPS: moved this far with you => following
@@ -101,8 +96,10 @@
 #define APPROACH_MIN_MS    60000UL  // ...over at least this long (transient filter)
 #define EMA_ALPHA          0.40f    // RSSI smoothing (kills single-sample spikes)
 
+#if ENABLE_GPS
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(1);
+#endif
 
 // ---------------- original globals (kept) ----------------
 bool activeMode = false;        // "shield/activate" word (no transmit in this build)
@@ -159,6 +156,8 @@ const OuiEntry OUI_TABLE[] = {
   // Xiaomi (Mi/Dafang)
   {{0x28,0x6C,0x07},"Xiaomi cam",2},{{0x34,0xCE,0x00},"Xiaomi cam",2},{{0x50,0xEC,0x50},"Xiaomi cam",2},
   {{0x64,0x09,0x80},"Xiaomi cam",2},{{0x78,0x11,0xDC},"Xiaomi cam",2},{{0xF0,0xB4,0x29},"Xiaomi cam",2},
+  // Arlo / Netgear
+  {{0xF0,0x18,0x98},"Arlo/Netgear",2},{{0x9C,0x3D,0xCF},"Arlo/Netgear",2},
   // Tuya white-label cams
   {{0x10,0x5A,0x17},"Tuya cam",2},{{0x50,0x02,0x91},"Tuya cam",2},{{0x68,0x57,0x2D},"Tuya cam",2},
   // Espressif (DIY ESP32-CAM are common in hidden cams) — info tier
@@ -213,10 +212,15 @@ double haversineMeters(double a1,double o1,double a2,double o2){
   return R*2*atan2(sqrt(a),sqrt(1-a));
 }
 String macToStr(const uint8_t* m){char b[18];sprintf(b,"%02X:%02X:%02X:%02X:%02X:%02X",m[0],m[1],m[2],m[3],m[4],m[5]);return String(b);}
+void safeCopy(char* dst,const char* src,size_t n){ if(!dst||!n)return; if(!src)src=""; strncpy(dst,src,n-1); dst[n-1]='\0'; }
+// quote a CSV field so SSIDs with commas/quotes can't corrupt the log
+String csvEscape(const String& in){ String o="\""; for(size_t i=0;i<in.length();i++){char c=in[i]; if(c=='"')o+="\"\""; else o+=c;} o+="\""; return o; }
 String getTimestamp(){
-  if(gps.date.isValid()&&gps.time.isValid()){char b[32];
+#if ENABLE_GPS
+  if(gps.date.isValid()&&gps.time.isValid()&&gps.time.age()<GPS_MAX_AGE_MS){char b[32];
     sprintf(b,"%04d-%02d-%02dT%02d:%02d:%02dZ",gps.date.year(),gps.date.month(),gps.date.day(),gps.time.hour(),gps.time.minute(),gps.time.second());
     return String(b);}
+#endif
   return String(millis()/1000)+"s";
 }
 bool isRandomMac(const uint8_t* m){return (m[0]&0x02)!=0;}
@@ -240,14 +244,17 @@ void addToHistory(String c){commandHistory[historyIndex]=c;historyIndex=(history
 
 // ---------------- scramble + status log (kept) ----------------
 void scrambleGPS(){
+#if ENABLE_GPS
   if(gps.location.isValid()){
     double nLat=(random(-150,150)/100000.0)*1.5;
     double nLon=(random(-150,150)/100000.0)*1.5;
     reportedLat=realLat+nLat; reportedLon=realLon+nLon;
   }
+#endif
 }
 void logStatusToSD(){
   scrambleGPS();
+#if ENABLE_SD
   if(!sdReady)return;
   logFile=SD.open("/guardian.log",FILE_APPEND);
   if(logFile){
@@ -256,9 +263,11 @@ void logStatusToSD(){
       realLat,realLon,reportedLat,reportedLon);
     logFile.close();
   }
+#endif
 }
 
-// ---------------- persistence ----------------
+// ---------------- persistence (SD only) ----------------
+#if ENABLE_SD
 void saveTable(){
   if(!sdReady)return;
   File f=SD.open(DB_PATH,FILE_WRITE); if(!f)return;
@@ -278,6 +287,10 @@ void loadTable(){
   f.close();
   Serial.printf("Loaded %d remembered devices.\n",deviceCount);
 }
+#else
+void saveTable(){}
+void loadTable(){}
+#endif
 
 // ---------------- audio (ES8311 codec + I2S tones) ----------------
 #if ENABLE_AUDIO
@@ -436,10 +449,12 @@ void logSighting(Sighting* s,int rssi){
   if(s->approachFlag)flag+="APPROACHING ";
   if(flag=="")flag="-";
   String line=getTimestamp()+","+String(curLat,6)+","+String(curLon,6)+","+
-    (s->isBle?"BLE":"WIFI")+","+macToStr(s->mac)+","+String(s->label)+","+
+    (s->isBle?"BLE":"WIFI")+","+macToStr(s->mac)+","+csvEscape(String(s->label))+","+
     String(rssi)+","+String(s->hits)+","+flag;
   Serial.println(line);
+#if ENABLE_SD
   if(sdReady){File f=SD.open(LOG_PATH,FILE_APPEND);if(f){f.println(line);f.close();}}
+#endif
 }
 
 // find existing, else allocate (evicting the oldest non-flagged when full)
@@ -499,7 +514,9 @@ void recordDevice(const uint8_t* mac,bool isBle,int rssi,const char* label,int r
 
 // ---------------- scans ----------------
 void scanWifi(){
-  int n=WiFi.scanNetworks(false,true);
+  // passive scan = listen for beacons only, never send probe requests
+  int n=WiFi.scanNetworks(false,true,WIFI_PASSIVE_SCAN,WIFI_SCAN_MS_PER_CHAN);
+  if(n<=0){WiFi.scanDelete();return;}
   for(int i=0;i<n;i++){
     uint8_t* b=WiFi.BSSID(i); if(!b)continue;
     char label[24]; int risk=0;
@@ -561,7 +578,13 @@ bool handleReview(String c){
   if(c=="help"||c=="?"){Serial.println("list | flagged | gps | save | clear | testalert  (encrypted cmds also work)");return true;}
   if(c=="list"){Serial.printf("== %d devices ==\n",deviceCount);for(int i=0;i<deviceCount;i++)printDevice(&devices[i]);return true;}
   if(c=="flagged"){int n=0;for(int i=0;i<deviceCount;i++)if(devices[i].vendorFlag||devices[i].mobileFlag||devices[i].approachFlag){printDevice(&devices[i]);n++;}Serial.printf("(%d flagged)\n",n);return true;}
-  if(c=="gps"){Serial.printf("GPS fix=%s lat=%.6f lon=%.6f sats=%d\n",gpsFix?"yes":"no",curLat,curLon,gps.satellites.isValid()?gps.satellites.value():0);return true;}
+  if(c=="gps"){
+#if ENABLE_GPS
+    Serial.printf("GPS fix=%s lat=%.6f lon=%.6f sats=%d\n",gpsFix?"yes":"no",curLat,curLon,gps.satellites.isValid()?gps.satellites.value():0);
+#else
+    Serial.println("GPS disabled (set ENABLE_GPS 1 after wiring a GPS module).");
+#endif
+    return true;}
   if(c=="save"){saveTable();Serial.println("Saved.");return true;}
   if(c=="clear"){deviceCount=0;saveTable();Serial.println("Cleared.");return true;}
   if(c=="testalert"){
@@ -599,7 +622,7 @@ void pollSerial(){
     char ch=Serial.read();
     if(ch=='\n'){ String line=buf; buf=""; String p=line; p.trim();
       if(!handleReview(p)) executeCommand(line); }
-    else if(ch!='\r') buf+=ch;
+    else if(ch!='\r'){ buf+=ch; if(buf.length()>96) buf=""; }   // overflow guard
   }
 }
 
@@ -630,6 +653,7 @@ void setup(){
   tftBanner("Pred_Ai booting...",ST77XX_GREEN);
 #endif
 
+#if ENABLE_SD
   sdReady=SD.begin(SD_CS_PIN);
   if(sdReady){
     Serial.println("SD OK");
@@ -639,13 +663,20 @@ void setup(){
     if(f){if(f.size()==0)f.println("timestamp,lat,lon,type,mac,label,rssi,hits,flags");f.close();}
     loadTable();
   } else Serial.println("SD: not found (serial/TFT only)");
+#else
+  sdReady=false;
+#endif
 
+#if ENABLE_GPS
   gpsSerial.begin(GPS_BAUD,SERIAL_8N1,GPS_RX_PIN,GPS_TX_PIN);
+#endif
 
-  WiFi.mode(WIFI_STA); WiFi.disconnect();   // station = listen only
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA); WiFi.disconnect(true,true);   // station = listen only
+  WiFi.setSleep(false); esp_wifi_set_ps(WIFI_PS_NONE);   // no power-save = reliable scans
   BLEDevice::init("");
   pBLEScan=BLEDevice::getScan();
-  pBLEScan->setActiveScan(true);
+  pBLEScan->setActiveScan(BLE_ACTIVE_SCAN);   // passive = receive-only (no scan requests)
   pBLEScan->setInterval(100); pBLEScan->setWindow(99);
 
 #if ENABLE_AUDIO
@@ -662,11 +693,14 @@ void setup(){
 void loop(){
   esp_task_wdt_reset();
   pollSerial();
+#if ENABLE_GPS
   while(gpsSerial.available()>0)gps.encode(gpsSerial.read());
-  if(gps.location.isUpdated()&&gps.location.isValid()){
+  gpsFix = gps.location.isValid() && gps.location.age()<GPS_MAX_AGE_MS;
+  if(gpsFix){
     realLat=gps.location.lat(); realLon=gps.location.lng();
-    curLat=realLat; curLon=realLon; gpsFix=true;
+    curLat=realLat; curLon=realLon;
   }
+#endif
   unsigned long now=millis();
   if(scanningEnabled && now-lastScan>SCAN_PERIOD){
     lastScan=now; scanCycle++;
