@@ -8,6 +8,7 @@
 
 #include <WiFi.h>
 #include "esp_wifi.h"
+#include "esp_mac.h"
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
@@ -816,6 +817,18 @@ void setup(){
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA); WiFi.disconnect(true,true);   // station = listen only
   WiFi.setSleep(false); esp_wifi_set_ps(WIFI_PS_NONE);   // no power-save = reliable scans
+
+  // Randomize our own WiFi MAC so the unit itself isn't fingerprintable.
+  uint8_t macr[6];
+  esp_read_mac(macr, ESP_MAC_WIFI_STA);
+  macr[0] = (macr[0] & 0xFC) | 0x02;   // locally-administered, unicast
+  uint32_t rnd = esp_random();
+  macr[3]=rnd&0xFF; macr[4]=(rnd>>8)&0xFF; macr[5]=(rnd>>16)&0xFF;
+  if(esp_wifi_set_mac(WIFI_IF_STA, macr)==ESP_OK)
+    Serial.printf("Randomized WiFi MAC: %s\n", macToStr(macr).c_str());
+  else
+    Serial.println("WiFi MAC randomize skipped (interface busy)");
+
   BLEDevice::init("");
   pBLEScan=BLEDevice::getScan();
   pBLEScan->setActiveScan(BLE_ACTIVE_SCAN);   // passive = receive-only (no scan requests)
