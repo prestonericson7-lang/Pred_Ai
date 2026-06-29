@@ -42,7 +42,7 @@
 // ---------------- audio (kit ES8311 codec speaker) ----------------
 // Verified LAFVIN pins. NOTE: GPIO48 is the speaker AMP enable (PA), not an LED.
 #define ENABLE_AUDIO  1          // 0 = silent (screen+serial only; no extra libs)
-#define ENABLE_VOICE  0          // 1 = SPEAK the alert (install "ESP8266SAM" lib first)
+#define ENABLE_VOICE  1          // SPEAK alerts/status aloud (needs "ESP8266SAM" lib)
 #define PA_EN_PIN     48         // speaker amplifier enable
 #define I2S_MCLK_PIN  38
 #define I2S_BCLK_PIN  14
@@ -56,6 +56,10 @@
 // Optional discrete LED — set to a free GPIO if you wire one (-1 = none).
 // (Do NOT use 48: that's the audio amp.)
 #define ALERT_LED_PIN -1
+
+// Kit buttons for voice interaction (active-low).
+#define BTN_STATUS_PIN 0    // BOOT button: speak a status summary
+#define BTN_MUTE_PIN   19   // kit button: mute / unmute alerts
 
 #if ENABLE_AUDIO && (ESP_IDF_VERSION_MAJOR < 5)
   #warning "Audio requires ESP32 Arduino core 3.x (IDF5) — disabling audio."
@@ -380,6 +384,15 @@ void alertSound(int kind,const char* phrase){
 #endif
   audioAlert(kind);
 }
+// Speak arbitrary text (status, replies, the `say` command). Chirps if no voice.
+void voiceSay(const char* text){
+#if ENABLE_VOICE
+  if(audioReady && speechSink){ ESP8266SAM sam; sam.Say(speechSink, text); return; }
+#else
+  (void)text;
+#endif
+  if(audioReady) audioTone(1200,120,0.6f);
+}
 #endif // ENABLE_AUDIO
 
 // ---------------- TFT ----------------
@@ -566,6 +579,41 @@ void performPassiveScan(){   // original name kept; real BLE detection
   pBLEScan->clearResults();
 }
 
+// ---------------- spoken status + buttons ----------------
+void speakStatus(){
+  int cams=0,trk=0,follow=0;
+  for(int i=0;i<deviceCount;i++){ Sighting* s=&devices[i];
+    if(s->mobileFlag||s->approachFlag) follow++;
+    else if(s->vendorFlag){ if(s->isBle) trk++; else cams++; }
+  }
+  char phrase[110];
+  snprintf(phrase,sizeof(phrase),"Status. %d cameras. %d trackers. %d devices following you.",cams,trk,follow);
+  Serial.println(phrase);
+#if ENABLE_TFT
+  tft.fillScreen(ST77XX_BLACK); tftBanner("STATUS", follow?ST77XX_RED:ST77XX_GREEN);
+  tft.setTextColor(ST77XX_WHITE,ST77XX_BLACK); tft.setTextSize(2);
+  tft.setCursor(8,40);  tft.printf("Cameras:  %d",cams);
+  tft.setCursor(8,72);  tft.printf("Trackers: %d",trk);
+  tft.setCursor(8,104); tft.printf("Following:%d",follow);
+  delay(300);
+#endif
+#if ENABLE_AUDIO
+  voiceSay(phrase);
+#endif
+}
+// Buttons: BOOT = speak status, GPIO19 = mute/unmute. Debounced, active-low.
+void pollButtons(){
+  static uint32_t last=0;
+  if(millis()-last<350) return;
+  if(digitalRead(BTN_STATUS_PIN)==LOW){ last=millis(); speakStatus(); }
+  else if(digitalRead(BTN_MUTE_PIN)==LOW){ last=millis(); alertsEnabled=!alertsEnabled;
+    Serial.printf("Alerts %s\n",alertsEnabled?"ON":"OFF");
+#if ENABLE_AUDIO
+    voiceSay(alertsEnabled?"Alerts on.":"Alerts muted.");
+#endif
+  }
+}
+
 // ---------------- serial commands ----------------
 void printDevice(const Sighting* s){
   bool f=s->vendorFlag||s->mobileFlag||s->approachFlag;
@@ -575,7 +623,14 @@ void printDevice(const Sighting* s){
 }
 bool handleReview(String c){
   c.trim(); c.toLowerCase();
-  if(c=="help"||c=="?"){Serial.println("list | flagged | gps | save | clear | testalert  (encrypted cmds also work)");return true;}
+  if(c=="help"||c=="?"){Serial.println("list | flagged | gps | status | say <text> | mute | save | clear | testalert");return true;}
+  if(c=="status"||c=="sum"){ speakStatus(); return true; }
+  if(c=="mute"){ alertsEnabled=!alertsEnabled; Serial.printf("Alerts %s\n",alertsEnabled?"ON":"OFF"); return true; }
+  if(c.startsWith("say ")){ String t=c.substring(4);
+#if ENABLE_AUDIO
+    voiceSay(t.c_str());
+#endif
+    Serial.println("(said)"); return true; }
   if(c=="list"){Serial.printf("== %d devices ==\n",deviceCount);for(int i=0;i<deviceCount;i++)printDevice(&devices[i]);return true;}
   if(c=="flagged"){int n=0;for(int i=0;i<deviceCount;i++)if(devices[i].vendorFlag||devices[i].mobileFlag||devices[i].approachFlag){printDevice(&devices[i]);n++;}Serial.printf("(%d flagged)\n",n);return true;}
   if(c=="gps"){
@@ -642,6 +697,8 @@ void setup(){
 #endif
 
   if(ALERT_LED_PIN>=0){pinMode(ALERT_LED_PIN,OUTPUT);digitalWrite(ALERT_LED_PIN,LOW);}
+  pinMode(BTN_STATUS_PIN,INPUT_PULLUP);
+  pinMode(BTN_MUTE_PIN,INPUT_PULLUP);
 
 #if ENABLE_TFT
   pinMode(TFT_BL,OUTPUT); digitalWrite(TFT_BL,HIGH);   // backlight on
@@ -693,6 +750,7 @@ void setup(){
 void loop(){
   esp_task_wdt_reset();
   pollSerial();
+  pollButtons();
 #if ENABLE_GPS
   while(gpsSerial.available()>0)gps.encode(gpsSerial.read());
   gpsFix = gps.location.isValid() && gps.location.age()<GPS_MAX_AGE_MS;

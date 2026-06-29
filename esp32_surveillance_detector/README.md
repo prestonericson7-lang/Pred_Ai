@@ -185,8 +185,26 @@ the device still works fully — it just starts fresh each boot.
 | `gps`       | Current GPS fix / coordinates / satellites      |
 | `save`      | Force-save the tracking table (if SD present)   |
 | `clear`     | Reset the table (SD CSV log is kept)            |
+| `status`    | Speak + show a summary (cameras/trackers/following) |
+| `say <text>`| Make it speak any text aloud                    |
+| `mute`      | Mute / unmute all alerts                        |
 | `testalert` | Fire the screen alert + speaker (verify audio)  |
 | `help`      | Show commands                                   |
+
+### Voice interaction (offline, no internet)
+
+Voice is **on** (`ENABLE_VOICE 1`). It speaks alerts and status aloud through the
+kit speaker, and you drive it without a phone or cloud:
+
+- **BOOT button** → speaks a status summary ("3 cameras, 1 tracker, 0 following").
+- **GPIO19 button** → mute / unmute.
+- Serial `say <text>` → it speaks whatever you type; `status` / `mute` too.
+
+> Requires the **ESP8266SAM** library (Library Manager — pulls in ESP8266Audio).
+> If it ever won't compile or stays silent, set `ENABLE_VOICE 0` to fall back to
+> the tone alerts. Full two-way conversation (like the kit's cloud chatbot) needs
+> internet and would broadcast constantly — left out on purpose so the unit stays
+> dark while it watches.
 
 ---
 
