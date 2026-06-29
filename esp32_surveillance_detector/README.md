@@ -83,7 +83,8 @@ Pins below are taken from LAFVIN's own board source (the display is **ST7789**,
 2. **Bare-kit libraries:** just **Adafruit GFX** + **Adafruit ST7789**. Audio uses
    the core's built-in I2S (no library). GPS/SD are **off by default**, so you do
    *not* need TinyGPSPlus unless you enable GPS.
-3. Open `surveillance_detector.ino`, upload.
+3. Open `esp32_surveillance_detector.ino`, upload. *(Or skip all of step 1–3 and
+   run the **[bootstrap script](BOOTSTRAP.md)** — it installs everything and builds.)*
 4. Open Serial Monitor at **115200 baud**.
 
 > **Optional hardware switches** at the top of the sketch:
