@@ -54,6 +54,7 @@
 // ---------------- audio (kit ES8311 codec speaker) ----------------
 // Verified LAFVIN pins. NOTE: GPIO48 is the speaker AMP enable (PA), not an LED.
 #define ENABLE_AUDIO  1          // 0 = silent (screen+serial only; no extra libs)
+#define ENABLE_VOICE  0          // 1 = SPEAK the alert (install "ESP8266SAM" lib first)
 #define PA_EN_PIN     48         // speaker amplifier enable
 #define I2S_MCLK_PIN  38
 #define I2S_BCLK_PIN  14
@@ -337,6 +338,35 @@ void audioAlert(int kind){
   else if(kind==2){ audioTone(1150,180,0.75f);audioGap(60);audioTone(1600,180,0.75f);} // rising couplet
   else { audioTone(1000,200,0.75f);audioGap(60);audioTone(1000,200,0.75f); }          // double beep
 }
+
+// ---- optional spoken voice (ESP8266SAM) reusing the same I2S channel ----
+#if ENABLE_VOICE
+#include "AudioOutput.h"     // from the ESP8266Audio library (dep of ESP8266SAM)
+#include <ESP8266SAM.h>
+// Sink that feeds SAM's samples straight into our ES8311 I2S channel.
+class I2SSpeechSink : public AudioOutput {
+ public:
+  bool begin() override { return true; }
+  bool ConsumeSample(int16_t sample[2]) override {
+    if(!audioReady) return false;
+    int16_t mono = sample[0];
+    size_t wr; i2s_channel_write(i2sTx, &mono, sizeof(mono), &wr, 50);
+    return true;
+  }
+  bool stop() override { return true; }
+};
+I2SSpeechSink* speechSink = nullptr;
+#endif
+
+// Speak the phrase if voice is enabled+ready; otherwise play the tone pattern.
+void alertSound(int kind,const char* phrase){
+#if ENABLE_VOICE
+  if(audioReady && speechSink){ ESP8266SAM sam; sam.Say(speechSink, phrase); return; }
+#else
+  (void)phrase;
+#endif
+  audioAlert(kind);
+}
 #endif // ENABLE_AUDIO
 
 // ---------------- TFT ----------------
@@ -390,7 +420,10 @@ void raiseAlert(const Sighting* s,const char* reason){
   tftAlertScreen(title,s);
 #endif
 #if ENABLE_AUDIO
-  audioAlert(kind);
+  const char* phrase = s->mobileFlag   ? "Warning. A device is following you."
+                     : s->approachFlag ? "Warning. A device is approaching."
+                                       : "Camera or tracker detected.";
+  alertSound(kind, phrase);
 #endif
   ledBlink();
 }
@@ -536,7 +569,7 @@ bool handleReview(String c){
     tftAlertFlash();
 #endif
 #if ENABLE_AUDIO
-    audioAlert(0);
+    alertSound(0, "Test alert.");
 #endif
     ledBlink();
     Serial.println("Test alert fired (screen + speaker + LED).");return true;}
@@ -617,6 +650,9 @@ void setup(){
 
 #if ENABLE_AUDIO
   audioInit();
+#if ENABLE_VOICE
+  if(audioReady) speechSink = new I2SSpeechSink();
+#endif
   if(audioReady) audioBoot();    // startup chime confirms the speaker works
 #endif
 

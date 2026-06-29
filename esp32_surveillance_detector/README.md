@@ -138,6 +138,22 @@ Each device alerts **once** so you aren't spammed on every re-sighting.
 > I2C (check the board), otherwise the ES8311 register init may need a tweak.
 > Set `ENABLE_AUDIO 0` to build silent (screen + serial only).
 
+#### Spoken-word voice (optional)
+
+Want it to **say** the alert ("Camera or tracker detected") instead of beeping?
+That's built in but off by default, because it's the one piece that needs an
+extra library and an on-hardware check:
+
+1. **Verify the speaker first** with the default tones (`testalert` → you hear
+   beeps). Get that working before adding voice.
+2. Install the **ESP8266SAM** library (Library Manager — it pulls in
+   ESP8266Audio).
+3. Set `#define ENABLE_VOICE 1` and re-upload.
+
+It reuses the same ES8311/I2S channel (no driver conflict) and **falls back to
+the tones automatically** if voice can't start. Recommended order: tones working
+→ then voice.
+
 ### Reboot-persistent memory *(needs SD)*
 
 With an SD card, the tracking table is saved to `/devices.dat` and reloaded on
